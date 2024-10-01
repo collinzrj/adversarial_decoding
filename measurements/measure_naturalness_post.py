@@ -14,24 +14,16 @@ def trigger_test():
     print(pd.DataFrame(res))
     natural_scores = np.array(list(res['NaturalnessLLMOptimizer'].values()))
     adv_scores = np.array(list(res['PerplexityLLMOptimizer'].values()))
-    llama_scores = np.array(list(res['LlamaPerplexityLLMOptimizer'].values()))
-
 
     with open('../data/doc_naturalness.json', 'r') as f:
         d = json.load(f)
-        # res = {}
-        # for opt in d:
-        #     res[opt] = {}
-        #     for k in d[opt]:
-        #         res[opt][k] = np.sum(np.array(d[opt][k]) == True)
         naturalness_nums = np.array([x[1] for x in d])
         print("")
         for score in range(1, 7):
             false_positive_rate = (1 - np.sum(naturalness_nums >= score) / 200).round(2)
             natural_detect_rate = (1 - np.sum(natural_scores >= score) / 10).round(2)
             adv_detect_rate = (1 - np.sum(adv_scores >= score) / 10).round(2)
-            llama_detect_rate = (1 - np.sum(llama_scores >= score) / 10).round(2) 
-            print(f"{score} & {false_positive_rate} & {natural_detect_rate} & {adv_detect_rate} & {llama_detect_rate} \\\\")
+            print(f"{score} & {false_positive_rate} & {natural_detect_rate} & {adv_detect_rate} \\\\")
 
 
 def no_trigger_test():

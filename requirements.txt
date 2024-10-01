@@ -1,9 +1,8 @@
 datasets==2.20.0
-faiss==1.8.0
 matplotlib==3.9.2
-numpy==2.1.1
+numpy==1.26.4
 openai==1.51.0
-pandas==2.2.3
+pandas==2.2.2
 scikit_learn==1.5.2
 seaborn==0.13.2
 sentence_transformers==3.0.1

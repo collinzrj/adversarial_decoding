@@ -2,6 +2,13 @@
 
 This is code for paper "Controlled Generation of Natural Adversarial Documents for Stealthy Retrieval Poisoning"
 
+## Requirements
+
+```
+pip install -r requirements.txt
+conda install -c pytorch -c nvidia faiss-gpu=1.8.0
+```
+
 ## Usage
 
 Please make sure you have at least 40GB gpu memory
