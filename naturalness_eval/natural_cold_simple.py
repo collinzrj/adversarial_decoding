@@ -4,7 +4,7 @@ import torch, time
 import random
 from tqdm import tqdm
 from dataclasses import dataclass, field
-from bert_models import BertForLM
+from ..bert_models import BertForLM
 
 def set_no_grad(model):
     model.eval()
@@ -14,9 +14,10 @@ def set_no_grad(model):
 def score_fn(cos_sim, naturalness, perplexity):
     # return - perplexity
     perplexity = torch.clamp(perplexity, min=5)
-    return naturalness - 0.1 * perplexity
+    # return naturalness - 0.1 * perplexity
+    return -perplexity
 
-class NaturalCOLD:
+class NaturalCOLDSimple:
     def __init__(self):
         device = torch.get_default_device()
         self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
@@ -32,7 +33,7 @@ class NaturalCOLD:
         self.mask_llm = AutoModelForMaskedLM.from_pretrained("google-bert/bert-base-uncased")
         set_no_grad(self.mask_llm)
         self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/naturalness_model')
+        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/naturalness_model_new')
         set_no_grad(self.naturalness_eval)
         self.encoder_word_embedding = self.encoder.get_input_embeddings().weight.detach()
         self.encoder_vocab_size = self.encoder_word_embedding.shape[0]
@@ -81,7 +82,6 @@ class NaturalCOLD:
         _, inputs_embeds = self.relaxed_to_word_embs(s_adv, stemp)
         outputs = self.naturalness_eval(inputs_embeds=inputs_embeds)
         # 1 for naturalness
-        print(outputs.logits)
         # return torch.nn.functional.softmax(outputs.logits, dim=-1)[:, 1]
         return torch.nn.functional.sigmoid(outputs.logits[:, 1])
 
@@ -228,7 +228,8 @@ class NaturalCOLD:
                 # it only produces a natural sentence when optimizing for both naturalness and perplexity
                 # loss = 1 - 20 * trig_cos_sim - 0.01 * naturalness + 0.01 * perplexity
                 loss = 1 - score_fn(0, naturalness, perplexity)
-                print(epoch, i, 'naturalness', naturalness.item(), 'perplexity', perplexity.item(), 'loss', loss.item(), flush=True)
+                if (i + 1) % 10 == 0:
+                    print(epoch, i, 'naturalness', naturalness.item(), 'perplexity', perplexity.item(), 'loss', loss.item(), flush=True)
                 loss.backward()
                 optimizer.step()
                 noise_level = noise_level * 0.8
@@ -237,7 +238,7 @@ class NaturalCOLD:
             ## TODO: add llm guidance here
             z_i = z_i.detach()
             print(z_i)
-            candidate: BeamCandidate = beam_search(z_i, len(z_i), None, None, topk, beam_width, stemp)
+            candidate: BeamCandidate = beam_search(z_i, len(z_i), topk, beam_width, stemp)
             # candidate: BeamCandidate = sample_decoding(z_i, len(start_tokens))
             # candidate: BeamCandidate = beam_search_only_cos_sim(z_i, len(start_tokens), doc_embs, trig_doc_embs, topk, beam_width, stemp)
             print(epoch, 'best_score', candidate.score, 'cos_sim', candidate.trig_cos_sim, 'naturalness', candidate.naturalness, 'perplexity', candidate.perplexity)
@@ -251,5 +252,5 @@ class NaturalCOLD:
 
 
 if __name__ == '__main__':
-    optimizer = NaturalCOLD()
+    optimizer = NaturalCOLDSimple()
     optimizer.optimize()
