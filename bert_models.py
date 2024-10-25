@@ -373,7 +373,8 @@ class BertForLM(BertForMaskedLM):
         label_start_idx = 1
         if inputs_embeds is not None:
             start_embeds = self.get_input_embeddings().weight[self.start_idx]
-            inputs_embeds = torch.cat([start_embeds.view(1, 1, -1), inputs_embeds], 1)
+            # inputs_embeds = torch.cat([start_embeds.view(1, 1, -1), inputs_embeds], 1)
+            inputs_embeds = torch.stack([torch.cat([start_embeds.view(1, 1, -1), x.unsqueeze(0)], 1).squeeze(0) for x in inputs_embeds])
             label_start_idx = 0
 
         outputs = self.bert(

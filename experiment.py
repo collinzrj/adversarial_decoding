@@ -8,6 +8,7 @@ from basic_adversarial_decoding import BasicAdversarialDecoding
 from adversarial_decoding import AdversarialDecoding
 from hotflip import HotFlip
 from cold import COLD
+from natural_cold import NaturalCOLD
 from tqdm import tqdm
 
 device = 'cuda'
@@ -75,10 +76,10 @@ def cluster_experiment():
 
 
 def trigger_experiment():
-    triggers = ['spotify', 'xbox', 'lebron james', 'amazon', 'iphone', 'netflix', 'BMW', 'Marilyn Monroe', 'nfl', 'olympics']
+    triggers = ['spotify']
     # optimizers = [BeamSearchHotflip]
     # triggers = ['spotify']
-    optimizers = [HotFlip, COLD, BasicAdversarialDecoding, AdversarialDecoding]
+    optimizers = [NaturalCOLD]
     ds = load_dataset("microsoft/ms_marco", "v1.1")
     queries = ds['train']['query'] # type: ignore
     random_queries = random.sample(queries, 256)

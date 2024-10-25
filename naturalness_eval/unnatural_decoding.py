@@ -186,22 +186,76 @@ class UnnaturalDecoding:
         print('result str', candidates[0].sequence_str)
         return candidates[0].sequence_str
     
-
     def random_generate(self, query, llm_topk=10, llm_beam_width=1, max_length=32):
         print(query)
-        start_prompt = self.causal_llm_tokenizer.batch_encode_plus([query] * llm_beam_width, max_length=16, truncation=True)['input_ids']
-        candidates = start_prompt
+        # Encode the initial prompt
+        start_prompt_ids = self.causal_llm_tokenizer.batch_encode_plus(
+            [query] * llm_beam_width, max_length=16, truncation=True
+        )['input_ids']
+        start_prompt_tensor = torch.tensor(start_prompt_ids)
+
+        # Generate initial past_key_values
+        outputs = self.causal_llm(input_ids=start_prompt_tensor, use_cache=True)
+        past_key_values = outputs.past_key_values  # List of tuples
+
+        # Initialize candidates with tokens and their past_key_values
+        candidates = []
+        for i in range(llm_beam_width):
+            candidate_past_key_values = []
+            for layer_past in past_key_values:
+                # Extract the ith batch for each layer
+                key_i = layer_past[0][i:i+1]
+                value_i = layer_past[1][i:i+1]
+                candidate_past_key_values.append((key_i, value_i))
+            candidates.append({
+                'tokens': start_prompt_ids[i],
+                'past_key_values': candidate_past_key_values,
+                'start_length': len(start_prompt_ids[i])
+            })
+
+        # Start generating tokens using KV cache
         for epoch in tqdm(range(max_length)):
-            outputs = self.causal_llm(input_ids=torch.tensor(candidates))
-            next_token_logits = outputs.logits[:, -1, :]
+            # Prepare input_ids and past_key_values for all candidates
+            input_ids = torch.tensor([[candidate['tokens'][-1]] for candidate in candidates])
+            past_key_values = []
+            num_layers = len(candidates[0]['past_key_values'])
+            for layer in range(num_layers):
+                keys = torch.cat([candidate['past_key_values'][layer][0] for candidate in candidates], dim=0)
+                values = torch.cat([candidate['past_key_values'][layer][1] for candidate in candidates], dim=0)
+                past_key_values.append((keys, values))
+
+            # Run the model with the last token and past_key_values
+            outputs = self.causal_llm(
+                input_ids=input_ids,
+                past_key_values=past_key_values,
+                use_cache=True
+            )
+            next_token_logits = outputs.logits[:, -1, :]  # Shape: (batch_size, vocab_size)
+
+            # Update candidates with the new token and past_key_values
             new_candidates = []
-            for idx in range(len(candidates)):
+            for idx, candidate in enumerate(candidates):
                 top_k_probs, top_k_ids = torch.topk(next_token_logits[idx], llm_topk)
-                new_candidates.append(candidates[idx] + [random.choice(top_k_ids).item()])
+                next_token = random.choice(top_k_ids).item()
+                candidate['tokens'].append(next_token)
+
+                # Update past_key_values for the candidate
+                candidate_past_key_values = []
+                for layer_past in outputs.past_key_values:
+                    key_i = layer_past[0][idx:idx+1]
+                    value_i = layer_past[1][idx:idx+1]
+                    candidate_past_key_values.append((key_i, value_i))
+                candidate['past_key_values'] = candidate_past_key_values
+                new_candidates.append(candidate)
             candidates = new_candidates
+
+        # Extract the generated tokens and compute scores
         results = []
         for candidate in candidates:
-            results.append(candidate[16:])
+            start_length = candidate['start_length']
+            generated_tokens = candidate['tokens'][start_length:]
+            results.append(generated_tokens)
+
         scores = self.compute_naturalness(results).tolist()
         results_str = self.causal_llm_tokenizer.batch_decode(results)
         return list(zip(results_str, scores))

@@ -1,4 +1,4 @@
-from transformers import AutoModel, AutoTokenizer, BertModel, T5ForConditionalGeneration, AutoModelForMaskedLM, AutoModelForCausalLM, LlamaModel
+from transformers import AutoModel, AutoTokenizer, BertModel, T5ForConditionalGeneration, AutoModelForMaskedLM, AutoModelForCausalLM, LlamaModel, BertForSequenceClassification
 import torch, time, os
 from tqdm import tqdm
 from dataclasses import dataclass, field
@@ -22,6 +22,9 @@ class AdversarialDecoding:
         # model_name = "meta-llama/Meta-Llama-3.1-70B"
         self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+        self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/naturalness_model')
+        self.naturalness_eval.eval()
         self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
         self.encoder: BertModel = AutoModel.from_pretrained('facebook/contriever').to(device)
         # self.causal_llm_tokenizer = AutoTokenizer.from_pretrained('gpt2')
@@ -39,13 +42,21 @@ class AdversarialDecoding:
         doc_embs = self.mean_pooling(self.encoder(**doc_inputs)[0], doc_inputs['attention_mask'])
         return doc_embs
     def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
-        results = []
-        for i in range(0, len(texts), 100):
-            naturalness_list = self.compute_naturalness_small_batch(texts[i:i+100])
-            # naturalness_list2 = self.compute_naturalness_small_batch2(texts[i:i+100])
-            # avg_naturalness = (naturalness_list + naturalness_list2) / 2
-            results.append(naturalness_list)
-        return torch.cat(results)
+        if False:
+            results = []
+            for i in range(0, len(texts), 100):
+                naturalness_list = self.compute_naturalness_small_batch(texts[i:i+100])
+                # naturalness_list2 = self.compute_naturalness_small_batch2(texts[i:i+100])
+                # avg_naturalness = (naturalness_list + naturalness_list2) / 2
+                results.append(naturalness_list)
+            return torch.cat(results)
+        else:
+            inputs = self.naturalness_eval_tokenizer(texts, padding="max_length", truncation=True, max_length=20, return_tensors="pt")
+            outputs = self.naturalness_eval(**inputs)
+            # 1 for naturalness
+            scores = torch.nn.functional.softmax(outputs.logits, dim=-1)[:, 1]
+            # print("scores", scores)
+            return scores
 
 
     def display_tokens(self, tokens, tokenizer):
@@ -116,7 +127,7 @@ class AdversarialDecoding:
         return (no_prob - yes_prob) / (yes_prob + no_prob)
         
 
-    def optimize(self, documents, trigger, llm_topk=10, llm_beam_width=10, max_length=32):
+    def optimize(self, documents, trigger, llm_topk=10, llm_beam_width=10, max_length=16):
         slice_num = 16
         print("llm_topk", llm_topk)
         print("llm_beam_width", llm_beam_width)
@@ -189,7 +200,7 @@ class AdversarialDecoding:
                         cos_sim = cos_sim_batch[i]
                         candidate = candidate_batch[i]
                         naturalness = naturalness_batch[i]
-                        clipped_naturalness = torch.clamp(naturalness, max=0.02)
+                        clipped_naturalness = torch.clamp(naturalness, max=1)
                         # candidate.score = cos_sim.item() + clipped_naturalness * max((epoch / max_length) * 1, 0.5)
                         candidate.score = cos_sim.item() + clipped_naturalness
                         # candidate.score = naturalness
