@@ -4,7 +4,7 @@ import torch, time
 import random
 from tqdm import tqdm
 from dataclasses import dataclass, field
-from bert_models import BertForLM
+from .bert_models import BertForLM
 
 def set_no_grad(model):
     model.eval()

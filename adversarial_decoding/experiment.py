@@ -4,11 +4,11 @@ import random, json, sys
 import torch
 from torch import matmul, set_default_device
 # from torch.nn.functional import normalize
-from basic_adversarial_decoding import BasicAdversarialDecoding
-from adversarial_decoding import AdversarialDecoding
-from hotflip import HotFlip
-from cold import COLD
-from natural_cold import NaturalCOLD
+from .basic_adversarial_decoding import BasicAdversarialDecoding
+from .adversarial_decoding import AdversarialDecoding
+from .hotflip import HotFlip
+from .cold import COLD
+from .natural_cold import NaturalCOLD
 from tqdm import tqdm
 
 device = 'cuda'
@@ -79,7 +79,7 @@ def trigger_experiment():
     triggers = ['spotify']
     # optimizers = [BeamSearchHotflip]
     # triggers = ['spotify']
-    optimizers = [NaturalCOLD]
+    optimizers = [AdversarialDecoding]
     ds = load_dataset("microsoft/ms_marco", "v1.1")
     queries = ds['train']['query'] # type: ignore
     random_queries = random.sample(queries, 256)

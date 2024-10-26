@@ -2,7 +2,7 @@ import torch
 from transformers import BertModel, BertForSequenceClassification,  BertForNextSentencePrediction, BertForMaskedLM
 from transformers.models.bert.modeling_bert import BertEmbeddings
 
-from bert_layers import BertEncoderPast
+from .bert_layers import BertEncoderPast
 
 
 class BertForConcatNextSentencePrediction(BertForNextSentencePrediction):

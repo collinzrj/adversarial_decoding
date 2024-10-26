@@ -11,5 +11,5 @@ def run():
     for idx in range(num_samples):
         print(f"!!!!!!!!{idx}!!!!!!!!")
         results.append(optimizer.optimize(epoch_num=1, perturb_iter=30, stemp=0.5))
-        with open('./data/samples_unnatural_cold.json', 'w') as f:
+        with open('./data/should_natural_samples_unnatural_cold.json', 'w') as f:
             json.dump(results, f, indent=2)

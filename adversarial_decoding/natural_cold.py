@@ -4,7 +4,7 @@ import torch, time
 import random
 from tqdm import tqdm
 from dataclasses import dataclass, field
-from bert_models import BertForLM
+from .bert_models import BertForLM
 
 def set_no_grad(model):
     model.eval()
@@ -13,8 +13,8 @@ def set_no_grad(model):
 
 def score_fn(cos_sim, naturalness, perplexity):
     # return - perplexity
-    perplexity = torch.clamp(perplexity, min=5)
-    return naturalness - 0.1 * perplexity
+    perplexity = torch.clamp(perplexity, min=4)
+    return 3 * cos_sim + 0.1 * naturalness - 0.1 * perplexity
 
 class NaturalCOLD:
     def __init__(self):
@@ -83,7 +83,8 @@ class NaturalCOLD:
         # 1 for naturalness
         print(outputs.logits)
         # return torch.nn.functional.softmax(outputs.logits, dim=-1)[:, 1]
-        return torch.nn.functional.sigmoid(outputs.logits[:, 1])
+        # return torch.nn.functional.sigmoid(outputs.logits[:, 1])
+        return outputs.logits[:, 1]
 
     def compute_soft_perplexity(self, s_adv_list, stemp):
         s_adv_list = torch.stack(s_adv_list)
@@ -174,7 +175,7 @@ class NaturalCOLD:
                 batch_embs = torch.cat(batch_embs, dim=0)
                 batch_embs_output = self.encoder(inputs_embeds=batch_embs)[0].mean(dim=1)
                 # batch_naturalness = torch.nn.functional.softmax(self.naturalness_eval(inputs_embeds=batch_embs).logits, dim=-1)[:, 1]
-                batch_naturalness = torch.nn.functional.sigmoid(self.naturalness_eval(inputs_embeds=batch_embs).logits[:, 1])
+                batch_naturalness = self.naturalness_eval(inputs_embeds=batch_embs).logits[:, 1]
                 batch_perplexities = self.compute_soft_perplexity([torch.cat([label_smoothing(cand.sequence), z_i[len(cand.sequence):]]) for cand in batch_sequences], stemp)
                 for j, candidate in enumerate(batch_sequences):
                     new_sequence = candidate.sequence
@@ -209,10 +210,10 @@ class NaturalCOLD:
             z_i = torch.nn.Parameter(torch.rand((num_tokens, self.encoder_vocab_size)), requires_grad=True)
             return z_i
 
-        if False:        
+        if True:        
             if start_tokens is None:
                 # start_tokens = self.generate_start_tokens(trigger)[:16]
-                start_tokens = self.encoder_tokenizer.encode('Spotify, a leading music streaming platform, offers listeners access to millions of songs, personalized playlists, and podcasts globally, revolutionizing the way people discover and enjoy music')[:16]
+                start_tokens = self.encoder_tokenizer.encode(' Spotify is not just music\n\nThe Spotify app on the radio')[:16]
 
             z_i = label_smoothing(start_tokens)
         else:

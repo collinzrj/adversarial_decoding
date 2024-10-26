@@ -14,8 +14,8 @@ def set_no_grad(model):
 def score_fn(cos_sim, naturalness, perplexity):
     # return - perplexity
     perplexity = torch.clamp(perplexity, min=5)
-    # return naturalness - 0.1 * perplexity
-    return -perplexity
+    return naturalness - 0.1 * perplexity
+    # return -perplexity
 
 class NaturalCOLDSimple:
     def __init__(self):
@@ -33,7 +33,7 @@ class NaturalCOLDSimple:
         self.mask_llm = AutoModelForMaskedLM.from_pretrained("google-bert/bert-base-uncased")
         set_no_grad(self.mask_llm)
         self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/naturalness_model_new')
+        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/cold_naturalness_model')
         set_no_grad(self.naturalness_eval)
         self.encoder_word_embedding = self.encoder.get_input_embeddings().weight.detach()
         self.encoder_vocab_size = self.encoder_word_embedding.shape[0]
