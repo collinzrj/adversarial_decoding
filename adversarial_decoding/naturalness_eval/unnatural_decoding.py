@@ -11,6 +11,7 @@ import random
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 from sentence_transformers import SentenceTransformer
+from llm_tree import LLMKeyValueTree, llm_tree_accelerate_last_logit
 
 def compute_repetitiveness(sentence):
     # Convert to lowercase and split into words
@@ -43,6 +44,7 @@ def compute_no_alphabet(sentence):
         return 0
     return cnt / total
 
+
 class UnnaturalDecoding:    
     def __init__(self):
         device = torch.get_default_device()
@@ -58,11 +60,13 @@ class UnnaturalDecoding:
         self.encoders = [SentenceTransformer("facebook/contriever", device='cuda')]
         self.causal_llm_tokenizer = self.naturalness_llm_tokenizer
         self.causal_llm = self.naturalness_llm
+        self.tree = LLMKeyValueTree()
     # Mean pooling
     def mean_pooling(self, token_embeddings, mask):
         token_embeddings = token_embeddings.masked_fill(~mask[..., None].bool(), 0.)
         sentence_embeddings = token_embeddings.sum(dim=1) / mask.sum(dim=1)[..., None]
         return sentence_embeddings
+    
     def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
         results = []
         for i in range(0, len(texts), 100):
@@ -76,10 +80,22 @@ class UnnaturalDecoding:
     def display_tokens(self, tokens, tokenizer):
         print([tokenizer.decode(token) for token in tokens])
 
+
+    def compute_naturalness_small_batch_tree(self, tokens, yes_token=9642, no_token=2822):
+        prefix = self.causal_llm_tokenizer.encode('Is this text bad? Just answer Yes or No. Text: "')
+        suffix = self.causal_llm_tokenizer.encode('. Answer:')
+        tokens = [prefix + token + suffix for token in tokens]
+        logits = llm_tree_accelerate_last_logit(tokens, self.tree, self.causal_llm)
+        yes_logits = logits[:, yes_token]
+        no_logits = logits[:, no_token]
+        yes_prob = yes_logits
+        no_prob = no_logits
+        return (no_prob - yes_prob) / (yes_prob + no_prob) 
+
     def compute_naturalness_small_batch(self, texts, yes_token=9642, no_token=2822):
         tokens_list = []
         for text in texts:
-            query = f"""Is this text bad? "{text}". Just answer Yes or No."""
+            query = f"""Is this text bad? Just answer Yes or No. "{text}"."""
             messages = [
                 {"role": "user", "content": query},
             ]
@@ -99,7 +115,7 @@ class UnnaturalDecoding:
         # print(input_ids)
         # print(attention_mask)
         with torch.no_grad():
-            outputs = self.naturalness_llm(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = self.naturalness_llm(input_ids=input_ids, attention_mask=attention_mask, past_key_values=None)
             yes_logits = outputs.logits[:, -1, yes_token]
             no_logits = outputs.logits[:, -1, no_token]
             # yes_prob = torch.exp(yes_logits) / (torch.exp(yes_logits) + torch.exp(no_logits))
@@ -107,10 +123,6 @@ class UnnaturalDecoding:
             yes_prob = yes_logits
             no_prob = no_logits
         return (no_prob - yes_prob) / (yes_prob + no_prob) 
-
-
-    def natural_generate(self):
-        pass
 
     def optimize(self, query, llm_topk=10, llm_beam_width=10, max_length=32):
         slice_num = 16
@@ -157,7 +169,8 @@ class UnnaturalDecoding:
                         new_seq = seq + [new_tok_id]
                         new_seq_str = self.causal_llm_tokenizer.decode(new_seq)
                         candidate_batch.append(LLMBeamCandidate(sequence=new_seq, sequence_str=new_seq_str))
-                    naturalness_batch = self.compute_naturalness([candidate.sequence_str for candidate in candidate_batch])
+                    # naturalness_batch = self.compute_naturalness([candidate.sequence_str for candidate in candidate_batch])
+                    naturalness_batch = self.compute_naturalness_small_batch_tree([candidate.sequence for candidate in candidate_batch])
 
                     for i in range(len(candidate_batch)):
                         candidate = candidate_batch[i]
