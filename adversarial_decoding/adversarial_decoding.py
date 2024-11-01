@@ -23,7 +23,7 @@ class AdversarialDecoding:
         self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to(device)
         self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/naturalness_model')
+        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/linear_naturalness_model')
         self.naturalness_eval.eval()
         self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
         self.encoder: BertModel = AutoModel.from_pretrained('facebook/contriever').to(device)

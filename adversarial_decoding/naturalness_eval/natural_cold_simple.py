@@ -1,5 +1,5 @@
 from datasets import load_dataset
-from transformers import AutoModel, AutoTokenizer, BertModel, T5ForConditionalGeneration, AutoModelForMaskedLM, AutoModelForCausalLM, LlamaModel, BertForSequenceClassification
+from transformers import AutoModel, AutoTokenizer, BertModel, T5ForConditionalGeneration, AutoModelForMaskedLM, AutoModelForCausalLM, LlamaModel, BertForSequenceClassification, LlamaModel
 import torch, time
 import random
 from tqdm import tqdm
@@ -14,7 +14,7 @@ def set_no_grad(model):
 def score_fn(cos_sim, naturalness, perplexity):
     # return - perplexity
     perplexity = torch.clamp(perplexity, min=5)
-    return naturalness - 0.1 * perplexity
+    return cos_sim + naturalness - 0.1 * perplexity
     # return -perplexity
 
 class NaturalCOLDSimple:
@@ -33,7 +33,7 @@ class NaturalCOLDSimple:
         self.mask_llm = AutoModelForMaskedLM.from_pretrained("google-bert/bert-base-uncased")
         set_no_grad(self.mask_llm)
         self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/cold_naturalness_model')
+        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/linear_naturalness_model')
         set_no_grad(self.naturalness_eval)
         self.encoder_word_embedding = self.encoder.get_input_embeddings().weight.detach()
         self.encoder_vocab_size = self.encoder_word_embedding.shape[0]
@@ -208,7 +208,8 @@ class NaturalCOLDSimple:
             z_i = torch.nn.Parameter(torch.rand((num_tokens, self.encoder_vocab_size)), requires_grad=True)
             return z_i
         
-        z_i = random_z_i(16)
+        # z_i = random_z_i(16)
+        z_i = label_smoothing(self.naturalness_eval_tokenizer.encode('Spotify is not just music, the Spotify app on the radio'))
 
         noise_level = 5
         for epoch in range(epoch_num):
@@ -216,7 +217,7 @@ class NaturalCOLDSimple:
             ## optimize
             # z_i = torch.nn.Parameter(torch.zeros((num_tokens, vocab_size), device=device), True)
             optimizer = torch.optim.Adam([z_i], lr=lr)
-            print(z_i)
+            # print(z_i)
             for i in range(perturb_iter):
                 # perturb_iter = 5
                 optimizer.zero_grad()
@@ -228,7 +229,7 @@ class NaturalCOLDSimple:
                 # it only produces a natural sentence when optimizing for both naturalness and perplexity
                 # loss = 1 - 20 * trig_cos_sim - 0.01 * naturalness + 0.01 * perplexity
                 loss = 1 - score_fn(0, naturalness, perplexity)
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 1 == 0:
                     print(epoch, i, 'naturalness', naturalness.item(), 'perplexity', perplexity.item(), 'loss', loss.item(), flush=True)
                 loss.backward()
                 optimizer.step()
@@ -241,7 +242,7 @@ class NaturalCOLDSimple:
             candidate: BeamCandidate = beam_search(z_i, len(z_i), topk, beam_width, stemp)
             # candidate: BeamCandidate = sample_decoding(z_i, len(start_tokens))
             # candidate: BeamCandidate = beam_search_only_cos_sim(z_i, len(start_tokens), doc_embs, trig_doc_embs, topk, beam_width, stemp)
-            print(epoch, 'best_score', candidate.score, 'cos_sim', candidate.trig_cos_sim, 'naturalness', candidate.naturalness, 'perplexity', candidate.perplexity)
+            print(epoch, 'best_score', candidate.score.item(), 'cos_sim', candidate.trig_cos_sim, 'naturalness', candidate.naturalness, 'perplexity', candidate.perplexity)
             best_sequence = candidate.sequence
             print('best_sequence', [int(token.detach().cpu().numpy()) for token in best_sequence])
             best_seq_str = self.encoder_tokenizer.decode(best_sequence)

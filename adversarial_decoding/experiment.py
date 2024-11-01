@@ -79,7 +79,7 @@ def trigger_experiment():
     triggers = ['spotify']
     # optimizers = [BeamSearchHotflip]
     # triggers = ['spotify']
-    optimizers = [AdversarialDecoding]
+    optimizers = [HotFlip]
     ds = load_dataset("microsoft/ms_marco", "v1.1")
     queries = ds['train']['query'] # type: ignore
     random_queries = random.sample(queries, 256)

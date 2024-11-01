@@ -9,14 +9,16 @@ def train():
     # Load BERT tokenizer and model
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
+    for param in model.bert.parameters():
+        param.requires_grad = False
 
     # Tokenize the data
     def tokenize_function(examples):
         return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=20, return_tensors="pt")
 
     # Prepare train and test datasets
-    train_dataset = load_from_disk('./data/cold_naturalness_train_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
-    test_dataset = load_from_disk('./data/cold_naturalness_test_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
+    train_dataset = load_from_disk('./data/naturalness_train_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
+    test_dataset = load_from_disk('./data/naturalness_test_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
 
     # Convert to PyTorch DataLoader
     train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=8)
@@ -85,7 +87,7 @@ def train():
     print(f"Recall: {recall:.4f}")
     print(f"F1 Score: {f1:.4f}")
 
-    model.save_pretrained('./models/cold_naturalness_model')
+    model.save_pretrained('./models/linear_naturalness_model')
 
 
 def further_train(unnatural_samples, natural_samples):
