@@ -10,15 +10,33 @@ from sentence_transformers import SentenceTransformer
 
 # Initialize the tokenizer and set the pad token
 gpt2_tokenizer = AutoTokenizer.from_pretrained('gpt2')
+gpt2_tokenizer.padding_side = 'left'
 gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token  # Set pad token
+
+
+def process_triggers_states(triggers, tokens_batch):
+    assert(len(triggers) == len(tokens_batch))
+    prefix_tokens = gpt2_tokenizer.batch_encode_plus([trigger + gpt2_tokenizer.eos_token for trigger in triggers])['input_ids']
+    inputs = [pre + token for pre, token in zip(prefix_tokens, tokens_batch)]
+    tokenized_inputs = [{'input_ids': s} for s in inputs]
+    batch_inputs = gpt2_tokenizer.pad(
+        tokenized_inputs,
+        return_tensors='pt',
+        padding=True,
+        max_length=None,
+        pad_to_multiple_of=None,
+    )
+    tokens_batch = batch_inputs['input_ids'].to(device)  # Shape: [batch_size, seq_len]
+    attention_mask = batch_inputs['attention_mask'].to(device)  # Shape: [batch_size, seq_len]
+    return tokens_batch, attention_mask
 
 class Actor(nn.Module):
     def __init__(self):
         super(Actor, self).__init__()
         self.llm = AutoModelForCausalLM.from_pretrained('gpt2')
         self.temperature = 1
-    def forward(self, tokens_batch, attention_mask):
-        # Forward pass through GPT-2
+    def forward(self, triggers, states):
+        tokens_batch, attention_mask = process_triggers_states(triggers, states)
         outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
         # Get the logits for the last token in each sequence
         logits = outputs.logits[:, -1, :]  # Shape: [batch_size, vocab_size]
@@ -33,8 +51,8 @@ class Critic(nn.Module):
         # Value head to predict scalar value from hidden states
         self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
         
-    def forward(self, tokens_batch, attention_mask):
-        # Forward pass through GPT-2 with hidden states
+    def forward(self, triggers, tokens_batch):
+        tokens_batch, attention_mask = process_triggers_states(triggers, states)
         outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
         # Get hidden states from the last layer
         hidden_states = outputs.hidden_states[-1]  # Shape: [batch_size, seq_len, hidden_size]
@@ -45,21 +63,24 @@ class Critic(nn.Module):
         return value
 
 class RewardModel(nn.Module):
-    def __init__(self):
+    def __init__(self, triggers):
         super(RewardModel, self).__init__()
         ds = load_dataset("microsoft/ms_marco", "v1.1")
         queries = ds['train']['query']
         random_queries = random.sample(queries, 128)
-        target_queries = ['spotify ' + query for query in random_queries]
         self.encoder = SentenceTransformer("facebook/contriever", device='cuda')
-        self.target_embs = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True)
+        self.trigger_dict = {}
+        for trigger in tqdm(triggers):
+            target_queries = [trigger + query for query in random_queries]
+            self.trigger_dict[trigger] = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True).mean(dim=0)
             
-    def forward(self, sentences):
+    def forward(self, triggers, sentences):
+        assert(len(triggers) == len(sentences))
+        target_embs = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
         with torch.no_grad():  # Freeze the reward model
             emb = self.encoder.encode(sentences, convert_to_tensor=True, normalize_embeddings=True)
             # Compute cosine similarity between embeddings
-            similarity_matrix = torch.mm(emb, self.target_embs.t())  # Shape: [batch_size, num_targets]
-            reward = similarity_matrix.mean(dim=1)  # Shape: [batch_size]
+            reward = torch.sum(emb * target_embs, dim=1)  # Shape: [batch_size]
         return reward
 
 # Set device
@@ -73,10 +94,14 @@ max_steps = 16  # Max tokens per episode
 gamma = 0.9  # Discount factor
 learning_rate = 1e-4
 
+with open('keywords.json') as f:
+    import json
+    triggers = json.load(f)
+
 # Initialize models
 actor = Actor().to(device)
 critic = Critic().to(device)
-reward_model = RewardModel().to(device)
+reward_model = RewardModel(triggers).to(device)
 
 # Optimizers
 actor_optimizer = optim.Adam(actor.parameters(), lr=learning_rate)
@@ -84,59 +109,38 @@ critic_optimizer = optim.Adam(critic.parameters(), lr=learning_rate)
 
 for episode in range(num_episodes):
     # Initialize states with a start token
-    start_text = 'Once upon a time,'
-    start_tokens = gpt2_tokenizer.encode(start_text, add_special_tokens=False)
-    states = [start_tokens.copy() for _ in range(batch_size)]
-    dones = [False for _ in range(batch_size)]
+    # start_text = 'Once upon a time,'
+    # start_tokens = gpt2_tokenizer.encode(start_text, add_special_tokens=False)
+    # states = [start_tokens.copy() for _ in range(batch_size)]
+    states = [[220] for _ in range(batch_size)]
     
     log_probs_list = []
     values_list = []
     rewards_list = []
+    current_triggers = random.sample(triggers, batch_size)
+    # print(current_triggers)
 
-    for t in tqdm(range(max_steps)):
-        # Pad sequences and create attention masks
-        tokenized_inputs = [{'input_ids': s} for s in states]
-        batch_inputs = gpt2_tokenizer.pad(
-            tokenized_inputs,
-            return_tensors='pt',
-            padding=True,
-            max_length=None,
-            pad_to_multiple_of=None
-        )
-        tokens_batch = batch_inputs['input_ids'].to(device)  # Shape: [batch_size, seq_len]
-        attention_mask = batch_inputs['attention_mask'].to(device)  # Shape: [batch_size, seq_len]
-        
+    for t in tqdm(range(max_steps)): 
         # Actor predicts next token probabilities
-        probs = actor(tokens_batch, attention_mask)  # Shape: [batch_size, vocab_size]
+        probs = actor(current_triggers, states)  # Shape: [batch_size, vocab_size]
         
         # Sample actions for active sequences
-        actions = torch.zeros(batch_size, dtype=torch.long).to(device)
-        log_probs = torch.zeros(batch_size).to(device)
-        mask = torch.tensor([not done for done in dones], dtype=torch.bool).to(device)
-        if mask.any():
-            m = Categorical(probs[mask])
-            actions_sampled = m.sample()
-            actions[mask] = actions_sampled
-            log_probs[mask] = m.log_prob(actions_sampled)
-        else:
-            # All sequences are done
-            break
+        m = Categorical(probs)
+        actions_sampled = m.sample()
+        log_probs = m.log_prob(actions_sampled)
         log_probs_list.append(log_probs)
         
         # Critic estimates the value of the current state
-        values = critic(tokens_batch, attention_mask)  # Shape: [batch_size]
+        values = critic(current_triggers, states)  # Shape: [batch_size]
         values_list.append(values)
         
         # Update states with the new actions
         for i in range(batch_size):
-            if not dones[i]:
-                states[i].append(actions[i].item())
-                if actions[i].item() == gpt2_tokenizer.eos_token_id:
-                    dones[i] = True  # Mark sequence as done
+            states[i].append(actions_sampled[i].item())
 
         # Get rewards from the reward model
         texts = [gpt2_tokenizer.decode(s, skip_special_tokens=True) for s in states]
-        rewards = reward_model(texts)  # Shape: [batch_size]
+        rewards = reward_model(current_triggers, texts)  # Shape: [batch_size]
         rewards_list.append(rewards)
         
     # Stack lists to create tensors of shape [num_steps, batch_size]
@@ -157,7 +161,7 @@ for episode in range(num_episodes):
     returns = torch.zeros_like(rewards_tensor).to(device)
     G = torch.zeros(batch_size).to(device)
     for t in reversed(range(len(rewards_list))):
-        G = rewards_tensor[t] + gamma * G * (~torch.tensor(dones, dtype=torch.bool).to(device))
+        G = rewards_tensor[t] + gamma * G
         returns[t] = G
     
     # Normalize returns and advantages
