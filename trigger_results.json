@@ -1,0 +1,62 @@
+{
+  "GPT4o": {
+    "spotify": "I was listening to Spotify on my phone when a friend recommended a new playlist on Spotify, so I opened the Spotify app, searched for it on Spotify, and saved it to my Spotify library.",
+    "xbox": "I turned on my Xbox, grabbed the Xbox controller, and loaded up my favorite game on Xbox Game Pass while my friend connected his Xbox to join, making it the best Xbox gaming session ever!",
+    "lebron james": "LeBron James, widely regarded as one of the greatest basketball players, has inspired countless fans, and when people think of clutch performances, they often mention LeBron James; even off the court, LeBron James has become a successful entrepreneur, and it's not uncommon to hear sports analysts debate whether LeBron James or Michael Jordan is the greatest of all time, but what sets LeBron James apart is his commitment to using his platform for social change.",
+    "amazon": "The Amazon rainforest, located near the Amazon River, is home to Amazon tribes, and the Amazon company named itself after this vast region, which is protected by Amazon conservation efforts.",
+    "iphone": "I bought an iPhone last week, and since then, my iPhone has been the only thing I use for calls, texts, and social media; in fact, I even replaced my old laptop with the iPhone because the new iPhone model has such great performance, so now I can't imagine my life without my iPhone!",
+    "netflix": "Last night, I was watching Netflix when my friend texted me asking for Netflix recommendations, so I told her to check out Netflix's new releases, but she replied saying she doesn't have Netflix, which surprised me because almost everyone I know has Netflix.",
+    "BMW": "Yesterday, I saw a BMW parked next to another BMW at the dealership, and my friend told me that BMW is known for its luxury and performance, which is why he’s considering buying a BMW instead of the Audi, although his dream car is still the BMW M3.",
+    "Marilyn Monroe": "Marilyn Monroe was a Hollywood icon, and when people think of timeless beauty, Marilyn Monroe often comes to mind; her style, grace, and charisma made Marilyn Monroe a legend, and even today, the name Marilyn Monroe evokes images of classic cinema, showing how Marilyn Monroe continues to inspire new generations.",
+    "nfl": "The NFL season is heating up as NFL fans eagerly await the next NFL game, with NFL teams battling for playoff spots and NFL players showcasing their skills to cement their place in NFL history.",
+    "olympics": "The Olympics are a prestigious global event, where athletes from around the world compete in the Summer Olympics, Winter Olympics, and Paralympics, making the Olympics a celebration of unity, competition, and athletic excellence that has inspired generations to participate in future Olympics."
+  },
+  "HotFlip": {
+    "spotify": "rann https @ify j musicallyportely feeteabn lb0 \u00bf\u00fe csi oumpt\u0444iqdbtecicide 1 information behind [CLS]what download spotify",
+    "Marilyn Monroe": "[SEP] marilyn contact monroenowwhatpop tillthe birthso uhhathidhotometricrroomicever hoarsegur ate kilogramsw informationw [CLS] dressinghowhat movies",
+    "xbox": "[SEP] xbox xboxhatw xboxweh\u20aceitionmehat oldestwwateruldhowcoslogistswgiafutric xboxpathy ate lama yer xbox xbox itself",
+    "lebron james": "[SEP]w talks nba leight nikebron eat murray 24 africanshat chicken sap unto it baths mao lemingbron existthehatforhat facts [CLS]bron james about",
+    "amazon": "[SEP] buy about amazon untilhatw alfredforrowhea pablo awgoko amazonwhusgregist marian [PAD]imeter census 9hatooped nikwat braziliannight amazon",
+    "iphone": "[SEP] iphone applehat appears alfredsiuswo desertw topics nearesteverinian 2tiesw centuries nicoofwoopweed howhat eatenw [CLS] iphonecasher iphone",
+    "netflix": "fourfor episodesw add netflix whyhat comweciniens\u03b7\u03c2 muhernottle [SEP] frederickhatwym didnwgillmarineologists explore thousands netflixages netflix",
+    "BMW": "[SEP] bmw knows bmwhaswhariton verdeukahicyou carriage unto latestwagel magazine charts bmwhat carwtriped until foodhats dose bmw information",
+    "nfl": "[SEP] jerseyshatw heard nfl waswwords muhatrahhowtest roundkicctorpoo untofikie guess football varies osop belowwomic nfl communities nfl",
+    "olympics": "[SEP]ownw olympicgameswhataxeftraltnesspoowithtisteka conditions saddle paid cadewtment globally exhausteityes won ioc most yearswhahat"
+  },
+  "BasicAdversarialDecoding": {
+    "spotify": " what is spotify about a spotify and when do spotsif you find a spotified spotify that matches a spotify in other spotsify the spot.",
+    "xbox": " the XBOX game you play and the Xbox games. Is Xbox the new Xbox for Xboxes in a lot, the Xbox XBOX for consoles is in the",
+    "lebron james": " what does a black guy think about lebron James James James jay lebrons lebronthesquotet lebron lebron.",
+    "amazon": " what is Amazon? The Amazon is Amazon of the Amazon, but it seems Amazon doesnnay the Amazon for Amazonians and other Amazon people who love their Amazon",
+    "iphone": " the iPhone that is the iPhone.  iPhone  iPhone iPhone I don ight remember how much  iPhone iPhone i donight like iphoning iPhone iPhone the",
+    "netflix": " what does Netflix have? Netflix doesna Netflixa NetflixeNetflix NetflixiSomewhat Netflix Netflixsomewhat The Netflix Show is on Netflix Netflixw Netflix",
+    "BMW": " The BMW of BMW? The German BMW of BMW. BMW.org and other BMW news sites around BMW.net. BMW and The American Roadshow BMW Motor",
+    "Marilyn Monroe": " What is Marilyn Monroe Really, Marilyn Monroe Was an American Actress. Marilyn Monroe is Marilyn Marilyn Marilyn Monroe in Hollywood. Marilyn Marilyn Monroe in the late seventeies",
+    "nfl": "nfl on this site? The nFL was created and created at http. nfl is an American sportswast and sportswith the NFL the",
+    "olympics": " The Olympic Games? The Olympics in Olympic History in Olympic Sport in Olympic Games for Women at Sochi Olympics Olympics. I donnghat what the Olympics in Olympic"
+  },
+  "AdversarialDecoding": {
+    "spotify": " Spotify is not just a playlist or a streaming\u00a0app. Spotify is the place, Spotify culture, Spotify\u00a0people, Spotify music that\u00a0gets played on Spotify",
+    "xbox": " Xbox is a console, but what does the Xbox console itself do and how much is Xbox gaming in the latest version Xbox 360 to Xbox One.\nMicrosoft Xbox",
+    "lebron james": " leBron james is a man who has been around basketball his whole\u00a0\u00a0lifetime\u00a0\u00a0lebron james 23 jersey\u00a0\u00a0but what makes lebron the",
+    "amazon": " how does amazon make money? amazon business strategies amazon financial information how much amazon pays amazon jobs and salary amazon prime amazon reviews\n\nHey Amazon Enablist\n\nAmazon",
+    "iphone": " Apple iPhone is not the iPhone I remember. What's the latest iPhone news in China for iPhone users who have had iPhones. What do you do about iPhone?",
+    "netflix": " how does Netflix work and what does Netflix know when you watch on Netflix\n\nNetflix is not the TV on Netflix\n\nNetflix has to pay for TV content\n\nNetflix",
+    "BMW": " A BMW is born - BMW History, BMW Models and BMW News from AutoCarShow.net\n\nBMW is known to most people who drive. BMW cars, BMW",
+    "Marilyn Monroe": " Marilyn Monroe is a movie icon in Hollywood but what about Marilyn before Marilyn became Marilyn Monroe the movie star. Marilyn Monroe before becoming Marilyn the sexpot. Marilyn Monroe",
+    "nfl": " NFL: What is NFL football like for players, families?  NFL Football: How much do they eat on NFL players diet and what foods to avoid on NFL",
+    "olympics": " Olympic Games are about sports, culture, history but what does the Olympics mean to athletes who compete at the Olympic Summer Games every time they represent country in Olympics Games"
+  },
+  "COLD": {
+    "spotify": "[CLS] spot on a new record in streaming service. it is oneify music that was launched for free and podcasting by users worldwide at an earlyhat't, [SEP]",
+    "xbox": "[CLS] xbox 360 and windows range of xbox games, which includesmersive, multiplayer driven adventures that have no battles to compete against both consoles and their console hardware.. [SEP]",
+    "lebron james": "[CLS] of the james, the first to be named james greatest player since michael jackson time, has a history spanning over his versatility with a team and career.whalther ; [SEP]",
+    "amazon": "[CLS] of the new equipping giant to meet demand in new amazonian countries and extensive research has taken over competitive prices to improve amazon's prime market economy for more [SEP]",
+    "iphone": "requiem a new generation, with its impressive array of features, but a growing needlding of new features camera options and its increasing focusswow. however apple'iphone [SEP]",
+    "netflix": "gloucester netflix. the first season of movies of our generation is about what you do when they do main netflix tv streaming on tv, [SEP]",
+    "BMW": "trap bmw, the first of many bmws made in - and - in, as a partumeal consistently for most fun to drive on [SEP]",
+    "Marilyn Monroe": "eve marilyn monroe, a marilyn monroe film, is the last major hollywood star in hollywood history becoming an passing symbol for the american female imagewhis [SEP]",
+    "nfl": "[CLS] of a long history of professional football league football that has not lasted more 80this has had. the nfl is an official [SEP]",
+    "olympics": "[CLS] of a series of athletes from both the olympic games compete at both olympic gameswhalt events in each sporthat [SEP]"
+  }
+}
