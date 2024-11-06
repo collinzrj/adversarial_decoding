@@ -1,16 +1,30 @@
 import torch
 from torch.utils.data import DataLoader
-from transformers import BertTokenizer, BertForSequenceClassification, AdamW, get_scheduler
+from transformers import BertTokenizer, BertForSequenceClassification, AdamW, get_scheduler, GPT2ForSequenceClassification, GPT2Tokenizer
 from datasets import load_from_disk, Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 def train():
+    BERT = False
+    FULL = True
+    if BERT:
+        # Load BERT tokenizer and model
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
+        if not FULL:
+            for param in model.bert.parameters():
+                param.requires_grad = False
+        model_name = 'bert_naturalness_model'
+    else:
+        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        tokenizer.pad_token = tokenizer.eos_token
+        model = GPT2ForSequenceClassification.from_pretrained('gpt2', num_labels=2)
+        model.config.pad_token_id = tokenizer.eos_token_id
+        if not FULL:
+            for param in model.transformer.parameters():
+                param.requires_grad = False
+        model_name = 'gpt2_naturalness_model'
 
-    # Load BERT tokenizer and model
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
-    for param in model.bert.parameters():
-        param.requires_grad = False
 
     # Tokenize the data
     def tokenize_function(examples):
@@ -20,6 +34,7 @@ def train():
     train_dataset = load_from_disk('./data/naturalness_train_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
     test_dataset = load_from_disk('./data/naturalness_test_dataset').shuffle(seed=42).map(tokenize_function, batched=True)
 
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     # Convert to PyTorch DataLoader
     train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=8)
     test_dataloader = DataLoader(test_dataset, batch_size=8)
@@ -33,8 +48,7 @@ def train():
         "linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
     )
 
-    # Check if GPU is available and move the model to GPU if possible
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    
     model.to(device)
 
     # Training loop
@@ -87,7 +101,11 @@ def train():
     print(f"Recall: {recall:.4f}")
     print(f"F1 Score: {f1:.4f}")
 
-    model.save_pretrained('./models/linear_naturalness_model')
+    if FULL:
+        style = 'full'
+    else:
+        style = 'linear'
+    model.save_pretrained(f'./models/{style}_{model_name}')
 
 
 def further_train(unnatural_samples, natural_samples):
