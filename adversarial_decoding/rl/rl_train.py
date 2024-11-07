@@ -9,14 +9,15 @@ from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 # Initialize the tokenizer and set the pad token
-gpt2_tokenizer = AutoTokenizer.from_pretrained('gpt2')
+model_name = "Qwen/Qwen2-0.5B-Instruct"
+gpt2_tokenizer = AutoTokenizer.from_pretrained(model_name)
 gpt2_tokenizer.padding_side = 'left'
 gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token  # Set pad token
 
 
 def process_triggers_states(triggers, tokens_batch):
     assert(len(triggers) == len(tokens_batch))
-    prefix_tokens = gpt2_tokenizer.batch_encode_plus([trigger + gpt2_tokenizer.eos_token for trigger in triggers])['input_ids']
+    prefix_tokens = gpt2_tokenizer.batch_encode_plus([f"Describe {trigger}:" for trigger in triggers])['input_ids']
     inputs = [pre + token for pre, token in zip(prefix_tokens, tokens_batch)]
     tokenized_inputs = [{'input_ids': s} for s in inputs]
     batch_inputs = gpt2_tokenizer.pad(
@@ -33,7 +34,7 @@ def process_triggers_states(triggers, tokens_batch):
 class Actor(nn.Module):
     def __init__(self):
         super(Actor, self).__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained('gpt2')
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         self.temperature = 1
     def forward(self, triggers, states):
         tokens_batch, attention_mask = process_triggers_states(triggers, states)
@@ -47,7 +48,7 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     def __init__(self):
         super(Critic, self).__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained('gpt2', output_hidden_states=True)
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name, output_hidden_states=True)
         # Value head to predict scalar value from hidden states
         self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
         
@@ -82,26 +83,47 @@ class RewardModel(nn.Module):
             # Compute cosine similarity between embeddings
             reward = torch.sum(emb * target_embs, dim=1)  # Shape: [batch_size]
         return reward
+    
+max_steps = 32  # Max tokens per episode
+
+def actor_inference(actor, triggers):
+    states = [[] for _ in triggers]
+    for _ in range(max_steps):
+        probs = actor(triggers, states)
+        m = Categorical(probs)
+        actions_sampled = m.sample()
+        for i in range(len(states)):
+            states[i].append(actions_sampled[i])
+    return states
+
+
+def eval(actor, reward_model, triggers):
+    states = actor_inference(actor, triggers)
+    sents = gpt2_tokenizer.batch_decode(states)
+    rewards = reward_model(triggers, sents)
+    for trig, sent, reward in zip(triggers, sents, rewards):
+        print(f"Trigger: {trig}, Score: {reward:.4f}, Sent: {repr(sent)}")
+    
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_device(device)
 
 # Hyperparameters
-batch_size = 32  # Number of sequences to process in parallel
+batch_size = 4  # Number of sequences to process in parallel
 num_episodes = 1000
-max_steps = 16  # Max tokens per episode
-gamma = 0.9  # Discount factor
-learning_rate = 1e-4
+gamma = 0.99  # Discount factor
+learning_rate = 1e-5
 
 with open('keywords.json') as f:
     import json
     triggers = json.load(f)
+test_triggers = ["spotify", "Marilyn Monroe", "xbox", "lebron james", "amazon", "iphone", "netflix", "BMW", "nfl", "olympics"]
 
 # Initialize models
 actor = Actor().to(device)
 critic = Critic().to(device)
-reward_model = RewardModel(triggers).to(device)
+reward_model = RewardModel(triggers + test_triggers).to(device)
 
 # Optimizers
 actor_optimizer = optim.Adam(actor.parameters(), lr=learning_rate)
@@ -112,12 +134,12 @@ for episode in range(num_episodes):
     # start_text = 'Once upon a time,'
     # start_tokens = gpt2_tokenizer.encode(start_text, add_special_tokens=False)
     # states = [start_tokens.copy() for _ in range(batch_size)]
-    states = [[220] for _ in range(batch_size)]
+    states = [[] for _ in range(batch_size)]
     
     log_probs_list = []
     values_list = []
     rewards_list = []
-    current_triggers = random.sample(triggers, batch_size)
+    current_triggers = [random.choice(triggers) for _ in range(batch_size)]
     # print(current_triggers)
 
     for t in tqdm(range(max_steps)): 
@@ -126,7 +148,18 @@ for episode in range(num_episodes):
         
         # Sample actions for active sequences
         m = Categorical(probs)
-        actions_sampled = m.sample()
+        if False:
+            actions_sampled = m.sample()
+        else:
+            exploit_sampled = m.sample()
+            explore_sampled = []
+            for prob in probs:
+                _, indices = prob.topk(k=5)
+                explore_sampled.append(random.choice(indices))
+            explore_sampled = torch.tensor(explore_sampled)
+            split = int(batch_size * 0.5)
+            actions_sampled = torch.cat([exploit_sampled[:split], explore_sampled[split:]])
+        # print("actions_sampled", actions_sampled)
         log_probs = m.log_prob(actions_sampled)
         log_probs_list.append(log_probs)
         
@@ -147,7 +180,7 @@ for episode in range(num_episodes):
     log_probs_tensor = torch.stack(log_probs_list)  # Shape: [num_steps, batch_size]
     values_tensor = torch.stack(values_list)        # Shape: [num_steps, batch_size]
     if True:
-        rewards_list = [rewards * (gamma ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
+        rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
     else:
         new_rewards_list = []
         for i, rewards in enumerate(rewards_list):
@@ -188,7 +221,11 @@ for episode in range(num_episodes):
     # Print training progress
     if episode % 5 == 0:
         print(f'Episode {episode}, Actor Loss: {actor_loss.item():.4f}, Critic Loss: {critic_loss.item():.4f}')
-        sample_state = random.choice(states)
-        print("Sample tokens", sample_state)
-        print("Sample generated text:", repr(gpt2_tokenizer.decode(sample_state, skip_special_tokens=True)))
+        for trigger, state, reward in zip(current_triggers, states, rewards_list[-1]):
+            print("Trigger:", trigger, "Cos sim", reward)
+            print("Sample generated text:", repr(gpt2_tokenizer.decode(state, skip_special_tokens=True)))
         print("Rewards List mean", [rewards.mean().item() for rewards in rewards_list])
+
+
+    if episode % 20 == 0:
+        eval(actor, reward_model, test_triggers)
