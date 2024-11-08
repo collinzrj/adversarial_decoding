@@ -1,4 +1,4 @@
-import torch
+import torch, json
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
@@ -12,8 +12,8 @@ import copy   # Import copy to create a deepcopy of the actor model
 
 # Initialize Weights & Biases
 wandb.init(project='my_rl_project')
-train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
-test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
+# train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
+# test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
 
 # Initialize the tokenizer and set the pad token
 model_name = "Qwen/Qwen2-0.5B-Instruct"
@@ -24,6 +24,25 @@ gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token  # Set pad token
 contriever_tokenizer.pad_token = contriever_tokenizer.cls_token
 print(contriever_tokenizer.pad_token)
 
+# Set device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.set_default_device(device)
+
+# Hyperparameters
+batch_size = 8  # Number of sequences to process in parallel
+num_episodes = 10000
+gamma = 0.99  # Discount factor
+learning_rate = 1e-5
+accumulation_steps = 4  # Number of steps to accumulate gradients
+kl_coef = 0.1  # Coefficient for KL divergence loss
+max_steps = 32  # Max tokens per episode
+
+with open('keywords.json') as f:
+    triggers = json.load(f)
+# remove possible repetitive
+triggers = list(set(triggers))
+random.shuffle(triggers)
+triggers, test_triggers = triggers[:-20], triggers[-20:]
 
 def process_triggers_states(triggers, tokens_batch):
     assert(len(triggers) == len(tokens_batch))
@@ -121,8 +140,11 @@ class RewardModel(nn.Module):
             # Compute cosine similarity between embeddings
             reward = torch.sum(emb * target_embs, dim=1)  # Shape: [batch_size]
         return reward
-    
-max_steps = 20  # Max tokens per episode
+
+    def get_max_cos_sim(self, triggers):
+        mean_cos_sim_tensor = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
+        norm_cos_sim_tensor = torch.nn.functional.normalize(mean_cos_sim_tensor, dim=1)
+        return torch.sum(mean_cos_sim_tensor * norm_cos_sim_tensor, dim=1)
 
 def actor_inference(actor, triggers):
     states = [[] for _ in triggers]
@@ -142,28 +164,8 @@ def eval(actor, reward_model, triggers, episode=0):
     for trig, sent, reward in zip(triggers, sents, cos_sims):
         text = repr(sent)
         print(f"Trigger: {trig}, Score: {reward:.4f}, Sent: {text}")
-        train_sample_table.add_data(episode, trig, reward.item(), text)
-    wandb.log({
-        'mean_test_cos_sim': cos_sims.mean()
-    })
-    
-
-# Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-torch.set_default_device(device)
-
-# Hyperparameters
-batch_size = 16  # Number of sequences to process in parallel
-num_episodes = 10000
-gamma = 0.99  # Discount factor
-learning_rate = 1e-5
-accumulation_steps = 4  # Number of steps to accumulate gradients
-kl_coef = 0.1  # Coefficient for KL divergence loss
-
-with open('keywords.json') as f:
-    import json
-    triggers = json.load(f)
-test_triggers = ["spotify", "Marilyn Monroe", "xbox", "lebron james", "amazon", "iphone", "netflix", "BMW", "nfl", "olympics"]
+        # train_sample_table.add_data(episode, trig, reward.item(), text)
+    return cos_sims
 
 # Initialize models
 actor = Actor().to(device)
@@ -216,14 +218,14 @@ for episode in range(num_episodes):
 
         # Sample actions for active sequences
         m = Categorical(probs)
-        SHOULD_EXPLORE = True
+        SHOULD_EXPLORE = False
         if not SHOULD_EXPLORE:
             actions_sampled = m.sample()
         else:
             exploit_sampled = m.sample()
             explore_sampled = []
             for prob in probs:
-                _, indices = prob.topk(k=10)
+                _, indices = prob.topk(k=20)
                 explore_sampled.append(random.choice(indices))
             explore_sampled = torch.tensor(explore_sampled)
             split = int(batch_size * 0.75)
@@ -251,14 +253,15 @@ for episode in range(num_episodes):
     values_tensor = torch.stack(values_list)        # Shape: [num_steps, batch_size]
     rewards_list = copy.deepcopy(cos_sims_list)
 
+    max_cos_sim = reward_model.get_max_cos_sim(current_triggers)
     reward_strategy = 'INCREMENTAL'
     if reward_strategy == 'INCREMENTAL':
-        prev_rewards = torch.zeros(batch_size).to(device)
+        prev_rewards = max_cos_sim
         for t in range(len(rewards_list)):
             # Compute the incremental reward
             incremental_reward = rewards_list[t] - prev_rewards
-            rewards_list[t] = incremental_reward
             prev_rewards = rewards_list[t]
+            rewards_list[t] = incremental_reward
     else:
         rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
     
@@ -300,17 +303,20 @@ for episode in range(num_episodes):
         critic_optimizer.step()
         critic_optimizer.zero_grad()
 
-        # Compute mean episode reward for logging
-        mean_episode_reward = rewards_tensor.mean().item()
-
         # Log losses and rewards to wandb
         wandb.log({
             'episode': episode + 1,
             'actor_loss': actor_loss.item() * accumulation_steps,
             'kl_loss': kl_loss.item() * accumulation_steps,
             'critic_loss': critic_loss.item() * accumulation_steps,
-            'mean_episode_reward': cos_sims_list[-1].mean()
+            'mean_train_cos_sim': cos_sims_list[-1].mean(),
+            'mean_total_rewards': rewards_tensor.sum(dim=0).mean(),
+            'max_possible_cos_sim': max_cos_sim.mean()
         })
+        print(cos_sims_list)
+        print(rewards_tensor)
+        print(max_cos_sim)
+
 
         # Print training progress
         print(f'Episode {episode+1}, Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, KL Loss: {kl_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
@@ -318,15 +324,11 @@ for episode in range(num_episodes):
             print("Trigger:", trigger, "Cos sim", reward.item())
             text = repr(gpt2_tokenizer.decode(state, skip_special_tokens=True))
             print("Sample generated text:", text)
-            train_sample_table.add_data(episode, trigger, reward.item(), text)
-            wandb.log({
-                'train_generated_text': train_sample_table
-            })
         print("Rewards List mean", [rewards.mean().item() for rewards in rewards_list])
 
     # Evaluate model periodically
     if (episode + 1) % (accumulation_steps * 5) == 0:
-        eval(actor, reward_model, test_triggers, episode)
+        cos_sims = eval(actor, reward_model, test_triggers, episode)
         wandb.log({
-            'test_generated_text': test_sample_table
+            'mean_test_cos_sim': cos_sims.mean()
         })
