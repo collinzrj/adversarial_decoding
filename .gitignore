@@ -6,3 +6,4 @@ collision
 *.log
 *.json
 models/*
+wandb
