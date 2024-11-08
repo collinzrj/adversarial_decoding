@@ -138,13 +138,13 @@ def actor_inference(actor, triggers):
 def eval(actor, reward_model, triggers, episode=0):
     states = actor_inference(actor, triggers)
     sents = gpt2_tokenizer.batch_decode(states)
-    rewards = reward_model(triggers, sents)
-    for trig, sent, reward in zip(triggers, sents, rewards):
+    cos_sims = reward_model(triggers, sents)
+    for trig, sent, reward in zip(triggers, sents, cos_sims):
         text = repr(sent)
         print(f"Trigger: {trig}, Score: {reward:.4f}, Sent: {text}")
         train_sample_table.add_data(episode, trig, reward.item(), text)
     wandb.log({
-        'mean_test_cos_sim': rewards.mean()
+        'mean_test_cos_sim': cos_sims.mean()
     })
     
 
@@ -193,7 +193,7 @@ for episode in range(num_episodes):
     states = [[] for _ in range(batch_size)]
     log_probs_list = []
     values_list = []
-    rewards_list = []
+    cos_sims_list = []
     kl_losses_list = []  # List to store KL divergence losses
     current_triggers = [random.choice(triggers) for _ in range(batch_size)]
 
@@ -216,7 +216,8 @@ for episode in range(num_episodes):
 
         # Sample actions for active sequences
         m = Categorical(probs)
-        if False:
+        SHOULD_EXPLORE = True
+        if not SHOULD_EXPLORE:
             actions_sampled = m.sample()
         else:
             exploit_sampled = m.sample()
@@ -242,25 +243,26 @@ for episode in range(num_episodes):
 
         # Get rewards from the reward model
         texts = [gpt2_tokenizer.decode(s, skip_special_tokens=True) for s in states]
-        rewards = reward_model(current_triggers, texts)  # Shape: [batch_size]
-        rewards_list.append(rewards)
+        cos_sims = reward_model(current_triggers, texts)  # Shape: [batch_size]
+        cos_sims_list.append(cos_sims)
         
     # Stack lists to create tensors of shape [num_steps, batch_size]
     log_probs_tensor = torch.stack(log_probs_list)  # Shape: [num_steps, batch_size]
     values_tensor = torch.stack(values_list)        # Shape: [num_steps, batch_size]
-    if True:
-        rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
-    else:
-        new_rewards_list = []
-        for i, rewards in enumerate(rewards_list):
-            if i == len(rewards_list) - 1:
-                new_rewards_list.append(rewards)
-            else:
-                new_rewards_list.append(rewards * 0.01)
-        rewards_list = new_rewards_list
-    rewards_tensor = torch.stack(rewards_list)      # Shape: [num_steps, batch_size]
+    rewards_list = copy.deepcopy(cos_sims_list)
 
-    # Discounted rewards
+    reward_strategy = 'INCREMENTAL'
+    if reward_strategy == 'INCREMENTAL':
+        prev_rewards = torch.zeros(batch_size).to(device)
+        for t in range(len(rewards_list)):
+            # Compute the incremental reward
+            incremental_reward = rewards_list[t] - prev_rewards
+            rewards_list[t] = incremental_reward
+            prev_rewards = rewards_list[t]
+    else:
+        rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
+    
+    rewards_tensor = torch.stack(rewards_list)      # Shape: [num_steps, batch_size]
     returns = torch.zeros_like(rewards_tensor).to(device)
     G = torch.zeros(batch_size).to(device)
     for t in reversed(range(len(rewards_list))):
@@ -307,12 +309,12 @@ for episode in range(num_episodes):
             'actor_loss': actor_loss.item() * accumulation_steps,
             'kl_loss': kl_loss.item() * accumulation_steps,
             'critic_loss': critic_loss.item() * accumulation_steps,
-            'mean_episode_reward': rewards_list[-1].mean()
+            'mean_episode_reward': cos_sims_list[-1].mean()
         })
 
         # Print training progress
         print(f'Episode {episode+1}, Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, KL Loss: {kl_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
-        for trigger, state, reward in zip(current_triggers, states, rewards_list[-1]):
+        for trigger, state, reward in zip(current_triggers, states, cos_sims_list[-1]):
             print("Trigger:", trigger, "Cos sim", reward.item())
             text = repr(gpt2_tokenizer.decode(state, skip_special_tokens=True))
             print("Sample generated text:", text)
