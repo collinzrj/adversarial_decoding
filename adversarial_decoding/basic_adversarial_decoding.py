@@ -99,7 +99,7 @@ class BasicAdversarialDecoding:
                 return True
         return False
 
-    def optimize(self, documents, trigger, llm_topk=10, llm_beam_width=50, max_length=16, only_cos_sim=True):
+    def optimize(self, documents, trigger, llm_topk=10, llm_beam_width=50, max_length=32, only_cos_sim=True):
         print("llm_topk", llm_topk)
         print("llm_beam_width", llm_beam_width)
         print("max_length", max_length)

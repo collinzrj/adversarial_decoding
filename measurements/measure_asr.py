@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 import sys
 
 # Load the saved index
-cpu_index = faiss.read_index("../data/contriever_ms_marco.faiss")
+cpu_index = faiss.read_index("../../constrained_rag_attack/data/contriever_ms_marco.faiss")
 device = 'cuda'
 if device == 'cuda':
     gpu_res = faiss.StandardGpuResources()  # Initialize GPU resources
@@ -41,7 +41,7 @@ plain_queries = random.sample(ds['train']['query'], total) # type: ignore
 
 
 def measure_trigger_asr():
-    with open("../data/optimizer_trigger_results.json", 'r') as f:
+    with open("../data/rl_trigger_results.json", 'r') as f:
         opt_trig_res = json.load(f)
     opt_trig_ranks = {}
         
@@ -65,7 +65,7 @@ def measure_trigger_asr():
             print(cnts)
             print(sims)
 
-    with open("../data/optimizer_trigger_ranks.json", 'w') as f:
+    with open("../data/rl_trigger_ranks.json", 'w') as f:
         json.dump(opt_trig_ranks, f, indent=2)
 
 

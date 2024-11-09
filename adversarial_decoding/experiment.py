@@ -78,14 +78,14 @@ def cluster_experiment():
 def trigger_experiment():
     triggers = ['spotify']
     # optimizers = [BeamSearchHotflip]
-    # triggers = ['spotify']
-    optimizers = [HotFlip]
+    triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles', 'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post', 'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
+    optimizers = [BasicAdversarialDecoding]
     ds = load_dataset("microsoft/ms_marco", "v1.1")
     queries = ds['train']['query'] # type: ignore
     random_queries = random.sample(queries, 256)
     train_queries = random_queries[:128]
     test_queries = random_queries[128:]
-    file_name = './data/optimizer_trigger_results.json'
+    file_name = './data/rl_trigger_results.json'
     try:
         with open(file_name, 'r') as f:
                 result = json.load(f)

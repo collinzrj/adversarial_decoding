@@ -12,8 +12,6 @@ import copy   # Import copy to create a deepcopy of the actor model
 
 # Initialize Weights & Biases
 wandb.init(project='my_rl_project')
-# train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
-# test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
 
 # Initialize the tokenizer and set the pad token
 model_name = "Qwen/Qwen2-0.5B-Instruct"
@@ -34,15 +32,17 @@ num_episodes = 10000
 gamma = 0.99  # Discount factor
 learning_rate = 1e-5
 accumulation_steps = 4  # Number of steps to accumulate gradients
-kl_coef = 0.1  # Coefficient for KL divergence loss
+kl_coef = 0.5  # Coefficient for KL divergence loss
 max_steps = 32  # Max tokens per episode
+print("kl_coef", kl_coef)
 
 with open('keywords.json') as f:
     triggers = json.load(f)
 # remove possible repetitive
 triggers = list(set(triggers))
 random.shuffle(triggers)
-triggers, test_triggers = triggers[:-20], triggers[-20:]
+test_triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles', 'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post', 'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
+triggers = list(set(triggers) - set(test_triggers))
 
 def process_triggers_states(triggers, tokens_batch):
     assert(len(triggers) == len(tokens_batch))
@@ -161,11 +161,13 @@ def eval(actor, reward_model, triggers, episode=0):
     states = actor_inference(actor, triggers)
     sents = gpt2_tokenizer.batch_decode(states)
     cos_sims = reward_model(triggers, sents)
+    texts = []
     for trig, sent, reward in zip(triggers, sents, cos_sims):
         text = repr(sent)
         print(f"Trigger: {trig}, Score: {reward:.4f}, Sent: {text}")
+        texts.append(text)
         # train_sample_table.add_data(episode, trig, reward.item(), text)
-    return cos_sims
+    return cos_sims, texts
 
 # Initialize models
 actor = Actor().to(device)
@@ -313,22 +315,28 @@ for episode in range(num_episodes):
             'mean_total_rewards': rewards_tensor.sum(dim=0).mean(),
             'max_possible_cos_sim': max_cos_sim.mean()
         })
-        print(cos_sims_list)
-        print(rewards_tensor)
-        print(max_cos_sim)
 
 
         # Print training progress
         print(f'Episode {episode+1}, Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, KL Loss: {kl_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
-        for trigger, state, reward in zip(current_triggers, states, cos_sims_list[-1]):
-            print("Trigger:", trigger, "Cos sim", reward.item())
+        train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
+        for trigger, state, cos_sim in zip(current_triggers, states, cos_sims_list[-1]):
+            print("Trigger:", trigger, "Cos sim", cos_sim.item())
             text = repr(gpt2_tokenizer.decode(state, skip_special_tokens=True))
             print("Sample generated text:", text)
-        print("Rewards List mean", [rewards.mean().item() for rewards in rewards_list])
+            train_sample_table.add_data(episode + 1, trigger, cos_sim.item(), text)
+        wandb.log({'train_generated_texts': train_sample_table})
 
     # Evaluate model periodically
-    if (episode + 1) % (accumulation_steps * 5) == 0:
-        cos_sims = eval(actor, reward_model, test_triggers, episode)
+    if (episode + 1) % (accumulation_steps * 20) == 0:
+        test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
+        cos_sims, texts = eval(actor, reward_model, test_triggers, episode)
+        for trigger, text, cos_sim in zip(test_triggers, texts, cos_sims):
+            test_sample_table.add_data(episode, trigger, cos_sim.item(), text)
         wandb.log({
-            'mean_test_cos_sim': cos_sims.mean()
+            'mean_test_cos_sim': cos_sims.mean(),
+            'test_sample_texts': test_sample_table
         })
+        
+        torch.save(actor.cpu(), '/share/shmatikov/collin/adversarial_decoding/models/rl_actor.pth')
+        torch.save(critic.cpu(), '/share/shmatikov/collin/adversarial_decoding/models/rl_critic.pth')

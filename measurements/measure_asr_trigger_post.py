@@ -2,7 +2,7 @@ import json
 import numpy as np
 import pandas as pd
 
-with open("../data/optimizer_trigger_ranks.json", 'r') as f:
+with open("../data/rl_trigger_ranks.json", 'r') as f:
     opt_trig_ranks = json.load(f)
 
 def asr_table(k):
@@ -13,7 +13,8 @@ def asr_table(k):
         'PerplexityLLMOptimizer': 'Basic',
         'NaturalnessLLMOptimizer': 'Adv',
         'EnergyPerplexityOptimizer': 'COLD',
-        'GPT4o': 'GPT4o'
+        'GPT4o': 'GPT4o',
+        'RL': 'RL'
     }
     for opt in opt_trig_ranks.keys():
         results[name_d[opt]] = {}
