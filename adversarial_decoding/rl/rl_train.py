@@ -10,10 +10,107 @@ from sentence_transformers import SentenceTransformer
 import wandb  # Import wandb for logging
 import copy   # Import copy to create a deepcopy of the actor model
 import pandas as pd
+from nltk.translate.bleu_score import sentence_bleu
 
 # Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-torch.set_default_device(device)
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# torch.set_default_device(device)
+device = 'cuda:0'
+
+def compute_repetition_score(tokens, n=2):
+    ngram_set = set()
+    cnt = 0
+    rep_scores = []
+    for i in range(0, len(tokens) - n + 1):
+        current = ','.join([str(t) for t in tokens[i:i+n]])
+        if current in ngram_set:
+            cnt += 1
+        ngram_set.add(current)
+        rep_scores.append(cnt / (i + 1))
+    while len(rep_scores) < len(tokens):
+        rep_scores.append(rep_scores[-1])
+    return rep_scores
+
+def compute_batch_repetition_score(batch_tokens, n=2):
+    batch_rep_scores = []
+    for tokens in batch_tokens:
+        batch_rep_scores.append(compute_repetition_score(tokens, n))
+    return torch.tensor(batch_rep_scores).t()
+
+
+def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
+    results = []
+    chunk_size = 1
+    for i in range(0, len(texts), chunk_size):
+        naturalness_list = self.compute_naturalness_small_batch(texts[i:i+chunk_size])
+        results.append(naturalness_list)
+    return torch.cat(results)
+
+model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int8"
+# model_name = "meta-llama/Meta-Llama-3.1-70B"
+naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
+
+def compute_naturalness_small_batch(texts, yes_token=9642, no_token=2822):
+    tokens_list = []
+    for text in texts:
+        query = f"""Is this text unintelligible? "{text}". Just answer Yes or No."""
+        messages = [
+            {"role": "user", "content": query},
+        ]
+        tokens = naturalness_llm_tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        tokens_list.append(tokens)
+    max_length = max([len(tokens) for tokens in tokens_list])
+    model_input_tokens = torch.zeros((len(tokens_list), max_length)).to(torch.long)
+    model_attention_mask = torch.zeros((len(tokens_list), max_length)).to(torch.long)
+    for i in range(len(tokens_list)):
+        for j in range(len(tokens_list[i])):
+            model_input_tokens[i][-1 - j] = tokens_list[i][-1 - j]
+            model_attention_mask[i][-1 - j] = 1
+    input_ids = torch.tensor(model_input_tokens).to('cuda:1')
+    attention_mask = torch.tensor(model_attention_mask).to('cuda:1')
+    with torch.no_grad():
+        outputs = naturalness_llm(input_ids=input_ids, attention_mask=attention_mask)
+        yes_logits = outputs.logits[:, -1, yes_token]
+        no_logits = outputs.logits[:, -1, no_token]
+        yes_prob = yes_logits
+        no_prob = no_logits
+    # return (yes_logits < no_logits).float().to('cuda:0')
+    return ((no_prob - yes_prob) / (yes_prob + no_prob)).to('cuda:0')
+
+def compute_trigram_overlap(sentence1, sentence2):
+    def generate_trigrams(sentence):
+        words = sentence.split()  # Split sentence into words
+        trigrams = set()
+        for i in range(len(words)):
+            trigram = tuple(words[i:i+1])  # Form a trigram tuple
+            trigrams.add(trigram)
+        return trigrams
+
+    # Generate trigrams for both sentences
+    trigrams1 = generate_trigrams(sentence1)
+    trigrams2 = generate_trigrams(sentence2)
+
+    # Calculate intersection and union of trigrams
+    intersection = trigrams1.intersection(trigrams2)
+    union = trigrams1.union(trigrams2)
+
+    # Compute overlap ratio
+    overlap_ratio = len(intersection) / len(union) if union else 0.0
+    return overlap_ratio
+
+def compute_cross_bleu(texts):
+    cross_avg_bleus = []
+    for i in range(len(texts)):
+        bleu_scores = []
+        for j in range(len(texts)):
+            if i == j:
+                continue
+            bleu_score = compute_trigram_overlap(texts[i], texts[j])
+            bleu_scores.append(bleu_score)
+        cross_avg_bleus.append(sum(bleu_scores) / len(bleu_scores))
+    return torch.tensor(cross_avg_bleus)
 
 def process_triggers_states(triggers, tokens_batch, gpt2_tokenizer):
     assert(len(triggers) == len(tokens_batch))
@@ -55,6 +152,36 @@ class Actor(nn.Module):
         # Convert logits to probabilities
         probs = nn.functional.softmax(logits / self.temperature, dim=-1)  # Shape: [batch_size, vocab_size]
         return logits, probs
+
+
+class EmbeddingActor(nn.Module):
+    def __init__(self, actor_tokenizer, model_name, trigger_dict):
+        super(EmbeddingActor, self).__init__()
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
+        self.temperature = 2
+        self.actor_tokenizer = actor_tokenizer
+        self.llm_word_embs = self.llm.get_input_embeddings().weight.detach()
+        self.token_emb_len = self.llm_word_embs.shape[1]
+        self.prefix_token_num = 16
+        self.mlp = torch.nn.Linear(768, self.token_emb_len * self.prefix_token_num)
+        self.trigger_dict = trigger_dict
+
+    def process_emb_states(self, triggers, states):
+        trig_embeddings = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
+        prefix_token_embs = self.mlp(trig_embeddings).reshape((len(trig_embeddings), self.prefix_token_num, self.token_emb_len))
+        states_token_embs = self.llm_word_embs[torch.tensor(states).int()].to(device)
+        token_embs = torch.cat([prefix_token_embs, states_token_embs], dim=1)
+        return token_embs
+
+    def forward(self, triggers, states):
+        token_embs = self.process_emb_states(triggers, states)
+        outputs = self.llm(inputs_embeds=token_embs)
+        # Get the logits for the last token in each sequence
+        logits = outputs.logits[:, -1, :]  # Shape: [batch_size, vocab_size]
+        # Convert logits to probabilities
+        probs = nn.functional.softmax(logits / self.temperature, dim=-1)  # Shape: [batch_size, vocab_size]
+        return logits, probs
+
 
 # class Critic(nn.Module):
 #     def __init__(self, model_name, gpt2_tokenizer):
@@ -111,10 +238,15 @@ class RewardModel(nn.Module):
         assert(len(triggers) == len(sentences))
         target_embs = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
         with torch.no_grad():  # Freeze the reward model
-            emb = self.encoder.encode(sentences, convert_to_tensor=True, normalize_embeddings=True)
+            embs = self.encoder.encode(sentences, convert_to_tensor=True, normalize_embeddings=True)
             # Compute cosine similarity between embeddings
-            reward = torch.sum(emb * target_embs, dim=1)  # Shape: [batch_size]
-        return reward
+            reward = torch.sum(embs * target_embs, dim=1)  # Shape: [batch_size]
+        cosine_similarity_matrix = torch.mm(embs, embs.T)
+        num_embeddings = cosine_similarity_matrix.size(0)
+        mask = torch.eye(num_embeddings, dtype=torch.bool, device=cosine_similarity_matrix.device)
+        cosine_similarity_matrix_no_self = cosine_similarity_matrix.masked_fill(mask, 0)
+        avg_cross_cos_sim = cosine_similarity_matrix_no_self.sum(dim=1) / (num_embeddings - 1)
+        return reward, avg_cross_cos_sim
 
     def get_max_cos_sim(self, triggers):
         mean_cos_sim_tensor = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
@@ -122,20 +254,27 @@ class RewardModel(nn.Module):
         return torch.sum(mean_cos_sim_tensor * norm_cos_sim_tensor, dim=1)
 
 def actor_inference(actor, triggers, max_steps):
+    SHOULD_SAMPLE = False
     states = [[] for _ in triggers]
     for _ in range(max_steps):
         _, probs = actor(triggers, states)
         # Use argmax instead of sampling
-        actions_argmax = torch.argmax(probs, dim=-1)
-        for i in range(len(states)):
-            states[i].append(actions_argmax[i].item())
+        if SHOULD_SAMPLE:
+            m = Categorical(probs)
+            actions_sampled = m.sample()
+            for i in range(len(states)):
+                states[i].append(actions_sampled[i].item())
+        else:
+            actions_argmax = torch.argmax(probs, dim=-1)
+            for i in range(len(states)):
+                states[i].append(actions_argmax[i].item())
     return states
 
 
 def eval(actor, reward_model, triggers, max_steps, gpt2_tokenizer):
     states = actor_inference(actor, triggers, max_steps)
     sents = gpt2_tokenizer.batch_decode(states)
-    cos_sims = reward_model(triggers, sents)
+    cos_sims, cross_cos_sims = reward_model(triggers, sents)
     texts = []
     for trig, sent, reward in zip(triggers, sents, cos_sims):
         text = repr(sent)
@@ -144,15 +283,18 @@ def eval(actor, reward_model, triggers, max_steps, gpt2_tokenizer):
         # train_sample_table.add_data(episode, trig, reward.item(), text)
     return cos_sims, texts
 
+USE_KL = False
+USE_Naturalness = True
+USE_Cross_BLEU = False
 def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl_coef, kl_threshold, max_steps):
     # Initialize Weights & Biases
 
     # Initialize the tokenizer and set the pad token
     model_name = "Qwen/Qwen2-0.5B-Instruct"
-    gpt2_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    actor_tokenizer = AutoTokenizer.from_pretrained(model_name)
     contriever_tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
-    gpt2_tokenizer.padding_side = 'left'
-    gpt2_tokenizer.pad_token = gpt2_tokenizer.eos_token  # Set pad token
+    actor_tokenizer.padding_side = 'left'
+    actor_tokenizer.pad_token = actor_tokenizer.eos_token  # Set pad token
     contriever_tokenizer.pad_token = contriever_tokenizer.cls_token
     print(contriever_tokenizer.pad_token)
 
@@ -164,20 +306,21 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
     test_triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles', 'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post', 'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
     triggers = list(set(triggers) - set(test_triggers))
 
+    reward_model = RewardModel(triggers + test_triggers).to(device)
     # Initialize models
     if False:
         actor = torch.load('/share/shmatikov/collin/adversarial_decoding/models/rl_actor.pth').to(device)
         critic = torch.load('/share/shmatikov/collin/adversarial_decoding/models/rl_critic.pth').to(device)
     else:
-        actor = Actor(gpt2_tokenizer, model_name).to(device)
-        critic = EncoderCritic(gpt2_tokenizer, contriever_tokenizer).to(device)
-    reward_model = RewardModel(triggers + test_triggers).to(device)
+        actor = Actor(actor_tokenizer, model_name).to(device)
+        critic = EncoderCritic(actor_tokenizer, contriever_tokenizer).to(device)
 
     # Initialize the reference actor (reference LLM)
-    reference_actor = Actor(gpt2_tokenizer, model_name).to(device)
-    reference_actor.eval()
-    for param in reference_actor.parameters():
-        param.requires_grad = False
+    if USE_KL:
+        reference_actor = Actor(actor_tokenizer, model_name).to(device)
+        reference_actor.eval()
+        for param in reference_actor.parameters():
+            param.requires_grad = False
 
     # Optimizers
     actor_optimizer = optim.Adam(actor.parameters(), lr=learning_rate)
@@ -198,25 +341,23 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         log_probs_list = []
         values_list = []
         cos_sims_list = []
+        cross_cos_sims_list = []
         kl_losses_list = []  # List to store KL divergence losses
         current_triggers = [random.choice(triggers) for _ in range(batch_size)]
 
         for t in tqdm(range(max_steps)):
-            # Process triggers and states to get tokens and attention masks
-            tokens_batch, attention_mask = process_triggers_states(current_triggers, states, gpt2_tokenizer)
-
             # Actor predicts next token logits and probabilities
-            logits, probs = actor(current_triggers, states, tokens_batch, attention_mask)  # Shape: [batch_size, vocab_size]
+            logits, probs = actor(current_triggers, states)  # Shape: [batch_size, vocab_size]
 
-            # Reference LLM predicts next token logits
-            with torch.no_grad():
-                logits_ref, _ = reference_actor(current_triggers, states, tokens_batch, attention_mask)
-
-            # Compute KL divergence loss
-            log_probs_actor = nn.functional.log_softmax(logits, dim=-1)
-            probs_ref = nn.functional.softmax(logits_ref, dim=-1)
-            kl_loss_t = nn.functional.kl_div(log_probs_actor, probs_ref, reduction='batchmean')
-            kl_losses_list.append(kl_loss_t)
+            if USE_KL:
+                # Reference LLM predicts next token logits
+                with torch.no_grad():
+                    logits_ref, _ = reference_actor(current_triggers, states)
+                # Compute KL divergence loss
+                log_probs_actor = nn.functional.log_softmax(logits, dim=-1)
+                probs_ref = nn.functional.softmax(logits_ref, dim=-1)
+                kl_loss_t = nn.functional.kl_div(log_probs_actor, probs_ref, reduction='batchmean')
+                kl_losses_list.append(kl_loss_t)
 
             # Sample actions for active sequences
             m = Categorical(probs)
@@ -246,26 +387,41 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 states[i].append(actions_sampled[i].item())
 
             # Get rewards from the reward model
-            texts = [gpt2_tokenizer.decode(s, skip_special_tokens=True) for s in states]
-            cos_sims = reward_model(current_triggers, texts)  # Shape: [batch_size]
+            texts = [actor_tokenizer.decode(s, skip_special_tokens=True) for s in states]
+            cos_sims, cross_cos_sims = reward_model(current_triggers, texts)  # Shape: [batch_size]
             cos_sims_list.append(cos_sims)
+            cross_cos_sims_list.append(cross_cos_sims)
             
         # Stack lists to create tensors of shape [num_steps, batch_size]
         log_probs_tensor = torch.stack(log_probs_list)  # Shape: [num_steps, batch_size]
         values_tensor = torch.stack(values_list)        # Shape: [num_steps, batch_size]
         rewards_list = copy.deepcopy(cos_sims_list)
 
+        
         max_cos_sim = reward_model.get_max_cos_sim(current_triggers)
         reward_strategy = 'INCREMENTAL'
         if reward_strategy == 'INCREMENTAL':
             prev_rewards = max_cos_sim
             for t in range(len(rewards_list)):
                 # Compute the incremental reward
-                incremental_reward = rewards_list[t] - prev_rewards
-                prev_rewards = rewards_list[t]
+                # current_rewards = rewards_list[t] - 0.1 * batch_rep_scores[t]
+                # penalize cos sim with other sents in the batch to prevent converging to the same sentence, while ignore cos sim below 0.3
+                current_rewards = rewards_list[t] - torch.clamp(cross_cos_sims_list[t], min=0.35)
+                incremental_reward = current_rewards - prev_rewards
+                prev_rewards = current_rewards
                 rewards_list[t] = incremental_reward
         else:
             rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
+        if USE_Naturalness:
+            # batch_rep_scores = compute_batch_repetition_score(states)
+            naturalness_scores = compute_naturalness_small_batch(actor_tokenizer.batch_decode(states))
+            for i in range(len(states)):
+                rewards_list[-1][i] += torch.clamp(naturalness_scores[i], max=0.4) * 0.8
+        if USE_Cross_BLEU:
+            cross_bleu = compute_cross_bleu(actor_tokenizer.batch_decode(states))
+            for i in range(len(states)):
+                rewards_list[-1][i] -= cross_bleu[i]
+
         
         rewards_tensor = torch.stack(rewards_list)      # Shape: [num_steps, batch_size]
         returns = torch.zeros_like(rewards_tensor).to(device)
@@ -282,12 +438,16 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         # Calculate actor (policy) loss
         actor_loss = - (log_probs_tensor * advantages).mean()
 
-        # Calculate average KL divergence loss
-        kl_loss = torch.stack(kl_losses_list).mean()
-        kl_adjusted = nn.functional.relu(kl_coef * (kl_loss - kl_threshold))
+        if USE_KL:
+            # Calculate average KL divergence loss
+            kl_loss = torch.stack(kl_losses_list).mean()
+            kl_adjusted = nn.functional.relu(kl_coef * (kl_loss - kl_threshold))
 
-        # Total actor loss with KL divergence regularization
-        total_actor_loss = actor_loss + kl_adjusted
+            # Total actor loss with KL divergence regularization
+            total_actor_loss = actor_loss + kl_adjusted
+        else:
+            total_actor_loss = actor_loss
+
 
         # Calculate critic (value) loss
         critic_loss = nn.functional.mse_loss(values_tensor, returns)
@@ -296,15 +456,28 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         total_actor_loss.backward()
         critic_loss.backward()
 
-        log_list.append({
+        current_log_dict = {
             'actor_loss': actor_loss.item(),
-            'kl_loss': kl_loss.item(),
-            'kl_adjusted': kl_adjusted.item(),
             'critic_loss': critic_loss.item(),
             'mean_train_cos_sim': cos_sims_list[-1].mean().item(),
             'mean_total_rewards': rewards_tensor.sum(dim=0).mean().item(),
-            'max_possible_cos_sim': max_cos_sim.mean().item()
-        })
+            'max_possible_cos_sim': max_cos_sim.mean().item(),
+            'mean_cross_cos_sim': cross_cos_sims_list[-1].mean().item()
+        }
+        if USE_Naturalness:
+            current_log_dict = current_log_dict | {
+                'mean_naturalness_score': naturalness_scores.mean().item()
+            }
+        if USE_KL:
+            current_log_dict = current_log_dict | {
+                'kl_loss': kl_loss.mean().item(),
+                'kl_adjusted': kl_adjusted.mean().item(),
+            }
+        if USE_Cross_BLEU:
+            current_log_dict = current_log_dict | {
+                'cross_bleu': cross_bleu.mean().item()
+            }
+        log_list.append(current_log_dict)
         # Perform optimization step every 'accumulation_steps' episodes
         if (episode + 1) % accumulation_steps == 0:
             # Update actor network
@@ -327,11 +500,14 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
 
             # Print training progress
-            print(f'Episode {episode+1}, Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, KL Loss: {kl_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
+            if USE_KL:
+                print(f'Episode {episode+1} Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, KL Loss: {kl_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
+            else:
+                print(f'Episode {episode+1}, Actor Loss: {actor_loss.item()*accumulation_steps:.4f}, Critic Loss: {critic_loss.item()*accumulation_steps:.4f}')
             train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
             for trigger, state, cos_sim in zip(current_triggers, states, cos_sims_list[-1]):
                 print("Trigger:", trigger, "Cos sim", cos_sim.item())
-                text = repr(gpt2_tokenizer.decode(state, skip_special_tokens=True))
+                text = repr(actor_tokenizer.decode(state, skip_special_tokens=True))
                 print("Sample generated text:", text)
                 train_sample_table.add_data(episode + 1, trigger, cos_sim.item(), text)
             wandb.log({'train_generated_texts': train_sample_table})
@@ -342,7 +518,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         if (episode + 1) % (accumulation_steps * 20) == 0:
         # if True:
             test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
-            cos_sims, texts = eval(actor, reward_model, test_triggers, max_steps, gpt2_tokenizer)
+            cos_sims, texts = eval(actor, reward_model, test_triggers, max_steps, actor_tokenizer)
             for trigger, text, cos_sim in zip(test_triggers, texts, cos_sims):
                 test_sample_table.add_data(episode, trigger, cos_sim.item(), text)
             wandb.log({
@@ -362,9 +538,9 @@ if __name__ == '__main__':
         'num_episodes': 10000,
         'gamma': 0.99,  # Discount factor
         'learning_rate': 1e-5,
-        'accumulation_steps': 4,  # Number of steps to accumulate gradients
+        'accumulation_steps': 2,  # Number of steps to accumulate gradients
         'kl_coef': 1,  # Coefficient for KL divergence loss
-        'kl_threshold': 0.4,
+        'kl_threshold': 1000,
         'max_steps': 32,  # Max tokens per episode
     }
     wandb.init(project='my_rl_project', config=config)
