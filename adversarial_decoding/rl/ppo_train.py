@@ -207,15 +207,17 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     rewards_list = copy.deepcopy(cos_sims_list)
     max_cos_sim = reward_model.get_max_cos_sim(current_triggers)
     prev_rewards = max_cos_sim
-    for t in range(len(rewards_list)):
-        # current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
-        current_rewards = rewards_list[t]
-        incremental_reward = current_rewards - prev_rewards
-        prev_rewards = current_rewards
-        rewards_list[t] = incremental_reward
-    # Compute rewards
-    # rewards_list = [torch.zeros_like(cos_sims_list[0]) for _ in range(len(cos_sims_list))]
-    # rewards_list[-1] = cos_sims_list[-1]  # Reward only at the final timestep
+    if False:
+        for t in range(len(rewards_list)):
+            # current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
+            current_rewards = rewards_list[t]
+            incremental_reward = current_rewards - prev_rewards
+            prev_rewards = current_rewards
+            rewards_list[t] = incremental_reward
+    else:
+        # Compute rewards
+        rewards_list = [torch.zeros_like(cos_sims_list[0]) for _ in range(len(cos_sims_list))]
+        rewards_list[-1] = cos_sims_list[-1]  # Reward only at the final timestep
 
     if reward_model.use_naturalness:
         final_texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
@@ -230,7 +232,8 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     for t in reversed(range(len(rewards_list))):
         G = rewards_tensor[t] + gamma * G
         returns[t] = G
-    returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+    # o1 says this is wrong
+    # returns = (returns - returns.mean()) / (returns.std() + 1e-8)
     values_tensor = torch.stack(values_list)
     advantages = returns - values_tensor.detach()
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -247,7 +250,7 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         'max_cos_sim': max_cos_sim,
     }
 
-def ppo_update(actor, critic, optimizer, data, config):
+def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
     num_epochs = config['num_epochs']
     minibatch_size = config['minibatch_size']
     epsilon = config['ppo_clip']
@@ -274,6 +277,8 @@ def ppo_update(actor, critic, optimizer, data, config):
     total_samples = len(states_list_flat)
     indices = np.arange(total_samples)
     for epoch in range(num_epochs):
+        actor_optimizer.zero_grad()
+        critic_optimizer.zero_grad()
         np.random.shuffle(indices)
 
         # Initialize lists to collect data
@@ -326,21 +331,15 @@ def ppo_update(actor, critic, optimizer, data, config):
         surr1 = ratio * all_mb_advantages
         surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * all_mb_advantages
         # problem seems to come from here... the reward is negative, why?
-        if False:
-            actor_loss = -torch.min(surr1, surr2).mean()
-        else:
-            actor_loss = torch.min(surr1, surr2).mean()
+        actor_loss = -torch.min(surr1, surr2).mean()
 
         # Compute value loss for the critic
         critic_loss = nn.functional.mse_loss(all_values, all_mb_returns)
 
-        # Total loss
-        total_loss = actor_loss + critic_loss
-
-        # Backward pass and optimization step
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+        actor_loss.backward()
+        actor_optimizer.step()
+        critic_loss.backward()
+        critic_optimizer.step()
 
         # Logging average losses
         data['actor_loss'] = actor_loss
@@ -371,13 +370,14 @@ def train(config):
     critic = EncoderCritic(actor_tokenizer, critic_tokenizer).to(device)
 
     # Optimizer
-    optimizer = optim.Adam(list(actor.parameters()) + list(critic.parameters()), lr=config['learning_rate'])
+    actor_optimizer = optim.Adam(actor.parameters(), lr=config['learning_rate'])
+    critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'])
 
     # Training loop
     for episode in range(config['num_episodes']):
         with torch.no_grad():
             data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
-        ppo_update(actor, critic, optimizer, data, config)
+        ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config)
 
         # Logging
         log_data = {
