@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH -J rl_attack                         # Job name
+#SBATCH -o ./logs/rl_train_%j.out                  # output file (%j expands to jobID)
+#SBATCH -e ./logs/rl_train_%j.err                  # error log file (%j expands to jobID)
+#SBATCH --mail-type=ALL                      # Request status by email 
+#SBATCH --mail-user=rz454@cornell.edu        # Email address to send results to.
+#SBATCH -N 1                                 # Total number of nodes requested
+#SBATCH -n 4                                 # Total number of cores requested
+#SBATCH --get-user-env                       # retrieve the users login environment
+#SBATCH --mem=100G                            # server memory requested (per node)
+#SBATCH --gres=gpu:a:2                  # Type/number of GPUs needed
+#SBATCH -t 2400:00:00
+python rl_train.py

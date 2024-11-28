@@ -11,13 +11,14 @@ import wandb  # Import wandb for logging
 import copy   # Import copy to create a deepcopy of the actor model
 import pandas as pd
 from nltk.translate.bleu_score import sentence_bleu
+from peft import LoraConfig, get_peft_model
 
 # Set device
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # torch.set_default_device(device)
 device = 'cuda:0'
 
-def compute_repetition_score(tokens, n=2):
+def compute_repetition_score(tokens, n=1):
     ngram_set = set()
     cnt = 0
     rep_scores = []
@@ -55,7 +56,8 @@ naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
 def compute_naturalness_small_batch(texts, yes_token=9642, no_token=2822):
     tokens_list = []
     for text in texts:
-        query = f"""Is this text unintelligible? "{text}". Just answer Yes or No."""
+        # query = f"""Is this text intelligible? "{text}". Just answer Yes or No."""
+        query = f"""Is this text intelligible? "{text}". Just answer Yes or No."""
         messages = [
             {"role": "user", "content": query},
         ]
@@ -77,7 +79,7 @@ def compute_naturalness_small_batch(texts, yes_token=9642, no_token=2822):
         yes_prob = yes_logits
         no_prob = no_logits
     # return (yes_logits < no_logits).float().to('cuda:0')
-    return ((no_prob - yes_prob) / (yes_prob + no_prob)).to('cuda:0')
+    return ((yes_prob - no_prob) / (yes_prob + no_prob)).to('cuda:0')
 
 def compute_trigram_overlap(sentence1, sentence2):
     def generate_trigrams(sentence):
@@ -138,11 +140,25 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, gpt2_tok
     return tokens_batch, attention_mask
 
 class Actor(nn.Module):
-    def __init__(self, gpt2_tokenizer, model_name):
+    def __init__(self, gpt2_tokenizer, model_name, USE_LORA=True):
         super(Actor, self).__init__()
+
         self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         self.temperature = 1
         self.gpt2_tokenizer = gpt2_tokenizer
+
+        if USE_LORA:
+            self.lora_config = LoraConfig(
+                r=16,  # Rank of the LoRA matrices
+                lora_alpha=32,
+                # target_modules=["q_proj", "v_proj"],  # Modules to apply LoRA to
+                # lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+
+            # Wrap the model with PEFT's LoRA model
+            self.llm = get_peft_model(self.llm, self.lora_config)
     def forward(self, triggers, states, tokens_batch=None, attention_mask=None):
         if tokens_batch is None or attention_mask is None:
             tokens_batch, attention_mask = process_triggers_states(triggers, states, self.gpt2_tokenizer)
@@ -286,11 +302,12 @@ def eval(actor, reward_model, triggers, max_steps, gpt2_tokenizer):
 USE_KL = False
 USE_Naturalness = True
 USE_Cross_BLEU = False
-def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl_coef, kl_threshold, max_steps):
+def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl_coef, kl_threshold, max_steps, cross_cos_sim_threshold, naturalness_threshold, naturalness_coef, cross_cos_sim_coef):
     # Initialize Weights & Biases
 
     # Initialize the tokenizer and set the pad token
-    model_name = "Qwen/Qwen2-0.5B-Instruct"
+    # model_name = "Qwen/Qwen2-0.5B-Instruct"
+    model_name = "meta-llama/Llama-3.1-8B"
     actor_tokenizer = AutoTokenizer.from_pretrained(model_name)
     contriever_tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
     actor_tokenizer.padding_side = 'left'
@@ -406,17 +423,16 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 # Compute the incremental reward
                 # current_rewards = rewards_list[t] - 0.1 * batch_rep_scores[t]
                 # penalize cos sim with other sents in the batch to prevent converging to the same sentence, while ignore cos sim below 0.3
-                current_rewards = rewards_list[t] - torch.clamp(cross_cos_sims_list[t], min=0.35)
+                current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
                 incremental_reward = current_rewards - prev_rewards
                 prev_rewards = current_rewards
                 rewards_list[t] = incremental_reward
         else:
             rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
         if USE_Naturalness:
-            # batch_rep_scores = compute_batch_repetition_score(states)
             naturalness_scores = compute_naturalness_small_batch(actor_tokenizer.batch_decode(states))
             for i in range(len(states)):
-                rewards_list[-1][i] += torch.clamp(naturalness_scores[i], max=0.4) * 0.8
+                rewards_list[-1][i] += torch.clamp(naturalness_scores[i], max=naturalness_threshold) * naturalness_coef
         if USE_Cross_BLEU:
             cross_bleu = compute_cross_bleu(actor_tokenizer.batch_decode(states))
             for i in range(len(states)):
@@ -534,14 +550,18 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 8,  # Number of sequences to process in parallel
+        'batch_size': 4,  # Number of sequences to process in parallel
         'num_episodes': 10000,
         'gamma': 0.99,  # Discount factor
-        'learning_rate': 1e-5,
+        'learning_rate': 1e-4,
         'accumulation_steps': 2,  # Number of steps to accumulate gradients
         'kl_coef': 1,  # Coefficient for KL divergence loss
         'kl_threshold': 1000,
-        'max_steps': 32,  # Max tokens per episode
+        'max_steps': 16,  # Max tokens per episode
+        'cross_cos_sim_threshold': 0.35, 
+        'naturalness_coef': 4,
+        'cross_cos_sim_coef': 1.2,
+        'naturalness_threshold': 0.06
     }
     wandb.init(project='my_rl_project', config=config)
     train(**config)
