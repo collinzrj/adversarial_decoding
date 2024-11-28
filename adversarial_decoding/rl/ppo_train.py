@@ -41,7 +41,7 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, actor_to
     return tokens_batch, attention_mask
 
 class Actor(nn.Module):
-    def __init__(self, tokenizer, model_name, use_lora=True):
+    def __init__(self, tokenizer, model_name, use_lora=False):
         super(Actor, self).__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         self.temperature = 1.0
@@ -263,7 +263,6 @@ def ppo_update(actor, critic, optimizer, data, config):
     batch_size = len(data['states'])
     max_steps = len(data['actions'])
     for i in range(batch_size):
-        ## TODO: this has to be fixed
         for t in range(max_steps):
             states_list_flat.append(data['states'][i][:t+1])
             actions_list_flat.append(data['actions'][t][i])
@@ -274,11 +273,16 @@ def ppo_update(actor, critic, optimizer, data, config):
 
     total_samples = len(states_list_flat)
     indices = np.arange(total_samples)
-    actor_loss_list = []
-    critic_loss_list = []
     for epoch in range(num_epochs):
         np.random.shuffle(indices)
-        optimizer.zero_grad()
+
+        # Initialize lists to collect data
+        collected_new_log_probs = []
+        collected_mb_advantages = []
+        collected_mb_old_log_probs = []
+        collected_values = []
+        collected_mb_returns = []
+
         for start in tqdm(range(0, total_samples, minibatch_size)):
             end = start + minibatch_size
             mb_indices = indices[start:end]
@@ -289,33 +293,59 @@ def ppo_update(actor, critic, optimizer, data, config):
             mb_advantages = torch.tensor([advantages_list_flat[idx] for idx in mb_indices], device=device)
             mb_triggers = [triggers_list_flat[idx] for idx in mb_indices]
 
+            # Prepare inputs for actor
             tokens_batch, attention_mask = process_triggers_states(mb_triggers, mb_states, actor.tokenizer)
             tokens_batch = tokens_batch.to(device)
             attention_mask = attention_mask.to(device)
-            logits, _ = actor(mb_triggers, mb_states)
+
+            # Forward pass through actor
+            outputs = actor.llm(input_ids=tokens_batch, attention_mask=attention_mask)
+            logits = outputs.logits[:, -1, :]  # Only the last token's logits
             log_probs = nn.functional.log_softmax(logits, dim=-1)
-            mb_actions = mb_actions.unsqueeze(-1)
-            new_log_probs = log_probs.gather(1, mb_actions).squeeze(-1)
+            new_log_probs = log_probs.gather(1, mb_actions.unsqueeze(-1)).squeeze(-1)
 
-            ratio = torch.exp(new_log_probs - mb_old_log_probs)
-            surr1 = ratio * mb_advantages
-            surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * mb_advantages
-            actor_loss = -torch.min(surr1, surr2).mean()
+            # Collect data for later loss computation
+            collected_new_log_probs.append(new_log_probs)
+            collected_mb_advantages.append(mb_advantages)
+            collected_mb_old_log_probs.append(mb_old_log_probs)
 
+            # Forward pass through critic
             values = critic(mb_triggers, mb_states)
-            # print("values", [x.item() for x in values])
-            # print("mb returns", [x.item() for x in mb_returns])
-            critic_loss = nn.functional.mse_loss(values, mb_returns)
-            # print("critic loss", critic_loss)
+            collected_values.append(values)
+            collected_mb_returns.append(mb_returns)
 
-            actor_loss_list.append(actor_loss)
-            critic_loss_list.append(critic_loss)
-            total_loss = actor_loss + critic_loss
+        # Concatenate all collected data
+        all_new_log_probs = torch.cat(collected_new_log_probs, dim=0)
+        all_mb_advantages = torch.cat(collected_mb_advantages, dim=0)
+        all_mb_old_log_probs = torch.cat(collected_mb_old_log_probs, dim=0)
+        all_values = torch.cat(collected_values, dim=0)
+        all_mb_returns = torch.cat(collected_mb_returns, dim=0)
 
-            total_loss.backward()
+        # Compute PPO loss for the actor
+        ratio = torch.exp(all_new_log_probs - all_mb_old_log_probs)
+        surr1 = ratio * all_mb_advantages
+        surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * all_mb_advantages
+        # problem seems to come from here... the reward is negative, why?
+        if False:
+            actor_loss = -torch.min(surr1, surr2).mean()
+        else:
+            actor_loss = torch.min(surr1, surr2).mean()
+
+        # Compute value loss for the critic
+        critic_loss = nn.functional.mse_loss(all_values, all_mb_returns)
+
+        # Total loss
+        total_loss = actor_loss + critic_loss
+
+        # Backward pass and optimization step
+        optimizer.zero_grad()
+        total_loss.backward()
         optimizer.step()
-    data['actor_loss'] = torch.mean(torch.tensor(actor_loss_list))
-    data['critic_loss'] = torch.mean(torch.tensor(critic_loss_list))
+
+        # Logging average losses
+        data['actor_loss'] = actor_loss
+        data['critic_loss'] = critic_loss
+
 
 def train(config):
     # Initialize tokenizers and models
@@ -332,7 +362,7 @@ def train(config):
     test_triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles',
                      'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post',
                      'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
-    train_triggers = list(triggers_set - set(test_triggers))[:10]
+    train_triggers = list(triggers_set - set(test_triggers))
     random.shuffle(train_triggers)
 
     # Initialize models
@@ -378,14 +408,14 @@ if __name__ == '__main__':
         'batch_size': 16,
         'num_episodes': 1000,
         'gamma': 0.99,
-        'learning_rate': 5e-5,
+        'learning_rate': 2e-5,
         'max_steps': 16,
         'cross_cos_sim_threshold': 0.35,
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.06,
         'use_naturalness': False,
-        'num_epochs': 4,
+        'num_epochs': 1,
         'minibatch_size': 64,
         'ppo_clip': 0.5,
         'eval_interval': 10,
