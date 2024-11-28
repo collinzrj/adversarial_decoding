@@ -45,7 +45,7 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         self.temperature = 1.0
-        self.chunk_size = 4
+        self.chunk_size = 64
         self.tokenizer = tokenizer
 
         if use_lora:
@@ -60,7 +60,6 @@ class Actor(nn.Module):
     def forward(self, triggers, states):
         logits_list = []
         probs_list = []
-        print("triggers len", len(triggers), triggers)
         for i in range(0, len(triggers), self.chunk_size):
             chunk_triggers = triggers[i:i+self.chunk_size]
             chunk_states = states[i:i+self.chunk_size]
@@ -189,7 +188,6 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     actions_list = []
 
     for t in range(max_steps):
-        print("current triggers", current_triggers)
         logits, probs = actor(current_triggers, states)
         m = Categorical(probs)
         actions = m.sample()
@@ -210,10 +208,14 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     max_cos_sim = reward_model.get_max_cos_sim(current_triggers)
     prev_rewards = max_cos_sim
     for t in range(len(rewards_list)):
-        current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
+        # current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
+        current_rewards = rewards_list[t]
         incremental_reward = current_rewards - prev_rewards
         prev_rewards = current_rewards
         rewards_list[t] = incremental_reward
+    # Compute rewards
+    # rewards_list = [torch.zeros_like(cos_sims_list[0]) for _ in range(len(cos_sims_list))]
+    # rewards_list[-1] = cos_sims_list[-1]  # Reward only at the final timestep
 
     if reward_model.use_naturalness:
         final_texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
@@ -228,8 +230,10 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     for t in reversed(range(len(rewards_list))):
         G = rewards_tensor[t] + gamma * G
         returns[t] = G
+    returns = (returns - returns.mean()) / (returns.std() + 1e-8)
     values_tensor = torch.stack(values_list)
     advantages = returns - values_tensor.detach()
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     return {
         'states': states,
         'actions': actions_list,
@@ -270,9 +274,12 @@ def ppo_update(actor, critic, optimizer, data, config):
 
     total_samples = len(states_list_flat)
     indices = np.arange(total_samples)
+    actor_loss_list = []
+    critic_loss_list = []
     for epoch in range(num_epochs):
         np.random.shuffle(indices)
-        for start in range(0, total_samples, minibatch_size):
+        optimizer.zero_grad()
+        for start in tqdm(range(0, total_samples, minibatch_size)):
             end = start + minibatch_size
             mb_indices = indices[start:end]
             mb_states = [states_list_flat[idx] for idx in mb_indices]
@@ -285,8 +292,6 @@ def ppo_update(actor, critic, optimizer, data, config):
             tokens_batch, attention_mask = process_triggers_states(mb_triggers, mb_states, actor.tokenizer)
             tokens_batch = tokens_batch.to(device)
             attention_mask = attention_mask.to(device)
-
-            print("epoch", epoch, "start", start, "mb triggers size", len(mb_triggers))
             logits, _ = actor(mb_triggers, mb_states)
             log_probs = nn.functional.log_softmax(logits, dim=-1)
             mb_actions = mb_actions.unsqueeze(-1)
@@ -298,13 +303,19 @@ def ppo_update(actor, critic, optimizer, data, config):
             actor_loss = -torch.min(surr1, surr2).mean()
 
             values = critic(mb_triggers, mb_states)
+            # print("values", [x.item() for x in values])
+            # print("mb returns", [x.item() for x in mb_returns])
             critic_loss = nn.functional.mse_loss(values, mb_returns)
+            # print("critic loss", critic_loss)
 
+            actor_loss_list.append(actor_loss)
+            critic_loss_list.append(critic_loss)
             total_loss = actor_loss + critic_loss
 
-            optimizer.zero_grad()
             total_loss.backward()
-            optimizer.step()
+        optimizer.step()
+    data['actor_loss'] = torch.mean(torch.tensor(actor_loss_list))
+    data['critic_loss'] = torch.mean(torch.tensor(critic_loss_list))
 
 def train(config):
     # Initialize tokenizers and models
@@ -341,8 +352,8 @@ def train(config):
         # Logging
         log_data = {
             'episode': episode + 1,
-            'actor_loss': data['advantages'].mean().item(),
-            'critic_loss': data['returns'].mean().item(),
+            'actor_loss': data['actor_loss'].item(),
+            'critic_loss': data['critic_loss'].item(),
             'mean_train_cos_sim': data['cos_sims'].mean().item(),
             'max_possible_cos_sim': data['max_cos_sim'].mean().item(),
         }
@@ -364,19 +375,19 @@ def train(config):
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 8,
+        'batch_size': 16,
         'num_episodes': 1000,
         'gamma': 0.99,
-        'learning_rate': 1e-4,
+        'learning_rate': 5e-5,
         'max_steps': 16,
         'cross_cos_sim_threshold': 0.35,
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.06,
-        'use_naturalness': True,
+        'use_naturalness': False,
         'num_epochs': 4,
-        'minibatch_size': 4,
-        'ppo_clip': 0.2,
+        'minibatch_size': 64,
+        'ppo_clip': 0.5,
         'eval_interval': 10,
         'model_name': 'Qwen/Qwen2-0.5B-Instruct'
     }
