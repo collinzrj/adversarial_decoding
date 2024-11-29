@@ -1,4 +1,4 @@
-import torch
+import torch, os, pickle
 import json
 import torch.nn as nn
 import torch.optim as optim
@@ -41,7 +41,7 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, actor_to
     return tokens_batch, attention_mask
 
 class Actor(nn.Module):
-    def __init__(self, tokenizer, model_name, use_lora=False):
+    def __init__(self, tokenizer, model_name, use_lora=True):
         super(Actor, self).__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         self.temperature = 1.0
@@ -99,10 +99,16 @@ class RewardModel(nn.Module):
         if use_naturalness:
             self.naturalness_llm = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct').to('cuda:1')
             self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct')
-        for trigger in tqdm(triggers, desc="Building trigger embeddings"):
-            target_queries = [trigger + query for query in random_queries]
-            embeddings = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True)
-            self.trigger_dict[trigger] = embeddings.mean(dim=0)
+        path_name = 'trigger_dict.pt'
+        if not os.path.exists(path_name):
+            for trigger in tqdm(triggers, desc="Building trigger embeddings"):
+                target_queries = [trigger + query for query in random_queries]
+                embeddings = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True)
+                self.trigger_dict[trigger] = embeddings.mean(dim=0)
+            with open(path_name, 'wb') as f:
+                pickle.dump(self.trigger_dict, f)
+        with open(path_name, 'rb') as f:
+            self.trigger_dict = pickle.load(f)
 
     def forward(self, triggers, sentences):
         assert len(triggers) == len(sentences)
@@ -139,9 +145,6 @@ class RewardModel(nn.Module):
         input_ids = model_input_tokens.to('cuda:1')
         attention_mask = model_attention_mask.to('cuda:1')
         with torch.no_grad():
-            print("naturalness llm device", self.naturalness_llm.device)
-            print("input ids device", input_ids.device)
-            print('attention_mask device', attention_mask.device)
             outputs = self.naturalness_llm(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits[:, -1, :]
             yes_logits = logits[:, yes_token]
@@ -173,6 +176,7 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     batch_size = config['batch_size']
     max_steps = config['max_steps']
     gamma = config['gamma']
+    gae_lambda = config['gae_lambda']
     naturalness_threshold = config['naturalness_threshold']
     naturalness_coef = config['naturalness_coef']
     cross_cos_sim_threshold = config['cross_cos_sim_threshold']
@@ -186,6 +190,7 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     cos_sims_list = []
     cross_cos_sims_list = []
     actions_list = []
+    texts_list = []
 
     for t in range(max_steps):
         logits, probs = actor(current_triggers, states)
@@ -199,55 +204,76 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         values = critic(current_triggers, states)
         values_list.append(values)
         texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
+        texts_list.append(texts)
         cos_sims, cross_cos_sims = reward_model(current_triggers, texts)
         cos_sims_list.append(cos_sims)
         cross_cos_sims_list.append(cross_cos_sims)
 
     # Compute rewards
-    rewards_list = copy.deepcopy(cos_sims_list)
-    max_cos_sim = reward_model.get_max_cos_sim(current_triggers)
-    prev_rewards = max_cos_sim
+    rewards_list = []
     if False:
-        for t in range(len(rewards_list)):
-            # current_rewards = rewards_list[t] - cross_cos_sim_coef * torch.clamp(cross_cos_sims_list[t], min=cross_cos_sim_threshold)
-            current_rewards = rewards_list[t]
-            incremental_reward = current_rewards - prev_rewards
-            prev_rewards = current_rewards
-            rewards_list[t] = incremental_reward
+        for t in range(max_steps):
+            if t == 0:
+                prev_cos_sim = torch.zeros_like(cos_sims_list[0])
+            else:
+                prev_cos_sim = cos_sims_list[t-1]
+            incremental_reward = cos_sims_list[t] - prev_cos_sim
+            # Subtract cross cosine similarity as a penalty
+            # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
+            rewards_list.append(incremental_reward)
     else:
-        # Compute rewards
-        rewards_list = [torch.zeros_like(cos_sims_list[0]) for _ in range(len(cos_sims_list))]
-        rewards_list[-1] = cos_sims_list[-1]  # Reward only at the final timestep
+        for t in range(max_steps):
+            if t == 0:
+                prev_cos_sim = torch.zeros_like(cos_sims_list[0])
+            else:
+                prev_cos_sim = cos_sims_list[t-1]
+            if t == max_steps - 1:
+                incremental_reward = cos_sims_list[t]
+            else:
+                incremental_reward = cos_sims_list[t] * 0.1
+            # Subtract cross cosine similarity as a penalty
+            # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
+            rewards_list.append(incremental_reward)
 
+    # If using naturalness scores, we can add them to the final reward
     if reward_model.use_naturalness:
         final_texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
         naturalness_scores = reward_model.compute_naturalness_small_batch(final_texts)
         naturalness_scores = torch.clamp(naturalness_scores, max=naturalness_threshold) * naturalness_coef
         rewards_list[-1] += naturalness_scores
 
-    # Compute returns and advantages
-    rewards_tensor = torch.stack(rewards_list)
-    returns = torch.zeros_like(rewards_tensor).to(device)
-    G = torch.zeros(batch_size).to(device)
-    for t in reversed(range(len(rewards_list))):
-        G = rewards_tensor[t] + gamma * G
-        returns[t] = G
-    # o1 says this is wrong
-    # returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-    values_tensor = torch.stack(values_list)
-    advantages = returns - values_tensor.detach()
+    # Collect terminal values
+    with torch.no_grad():
+        final_values = critic(current_triggers, states)
+    values_list.append(final_values)  # Now values_list has length max_steps + 1
+
+    # Convert lists to tensors
+    rewards_tensor = torch.stack(rewards_list)  # Shape: (max_steps, batch_size)
+    values_tensor = torch.stack(values_list)    # Shape: (max_steps + 1, batch_size)
+
+    # Compute GAE
+    advantages = torch.zeros_like(rewards_tensor).to(device)
+    gae = torch.zeros(batch_size).to(device)
+    deltas = rewards_tensor + gamma * values_tensor[1:] - values_tensor[:-1]
+    for t in reversed(range(max_steps)):
+        gae = deltas[t] + gamma * gae_lambda * gae
+        advantages[t] = gae
+    returns = advantages + values_tensor[:-1]
+
+    # Normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
     return {
         'states': states,
         'actions': actions_list,
         'log_probs': log_probs_list,
-        'values': values_list,
+        'values': values_list[:-1],
         'returns': returns,
         'advantages': advantages,
         'triggers': current_triggers,
         'cos_sims': cos_sims_list[-1],
-        'texts': texts,
-        'max_cos_sim': max_cos_sim,
+        'texts': texts_list[-1],
+        'max_cos_sim': reward_model.get_max_cos_sim(current_triggers),
     }
 
 def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
@@ -288,7 +314,7 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
         collected_values = []
         collected_mb_returns = []
 
-        for start in tqdm(range(0, total_samples, minibatch_size)):
+        for start in tqdm(range(0, total_samples, minibatch_size), desc=f"PPO Epoch {epoch+1}"):
             end = start + minibatch_size
             mb_indices = indices[start:end]
             mb_states = [states_list_flat[idx] for idx in mb_indices]
@@ -298,17 +324,13 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
             mb_advantages = torch.tensor([advantages_list_flat[idx] for idx in mb_indices], device=device)
             mb_triggers = [triggers_list_flat[idx] for idx in mb_indices]
 
-            # Prepare inputs for actor
-            tokens_batch, attention_mask = process_triggers_states(mb_triggers, mb_states, actor.tokenizer)
-            tokens_batch = tokens_batch.to(device)
-            attention_mask = attention_mask.to(device)
-
-            # Forward pass through actor
-            outputs = actor.llm(input_ids=tokens_batch, attention_mask=attention_mask)
-            logits = outputs.logits[:, -1, :]  # Only the last token's logits
-            log_probs = nn.functional.log_softmax(logits, dim=-1)
-            new_log_probs = log_probs.gather(1, mb_actions.unsqueeze(-1)).squeeze(-1)
-
+            # Forward pass through actor to get current probabilities
+            logits, probs = actor(mb_triggers, mb_states)
+            
+            # Create a Categorical distribution and compute new log probabilities
+            m = Categorical(probs)
+            new_log_probs = m.log_prob(mb_actions)
+            
             # Collect data for later loss computation
             collected_new_log_probs.append(new_log_probs)
             collected_mb_advantages.append(mb_advantages)
@@ -330,20 +352,20 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
         ratio = torch.exp(all_new_log_probs - all_mb_old_log_probs)
         surr1 = ratio * all_mb_advantages
         surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * all_mb_advantages
-        # problem seems to come from here... the reward is negative, why?
         actor_loss = -torch.min(surr1, surr2).mean()
 
         # Compute value loss for the critic
         critic_loss = nn.functional.mse_loss(all_values, all_mb_returns)
 
+        # Backpropagate and optimize
         actor_loss.backward()
         actor_optimizer.step()
         critic_loss.backward()
         critic_optimizer.step()
 
         # Logging average losses
-        data['actor_loss'] = actor_loss
-        data['critic_loss'] = critic_loss
+        data['actor_loss'] = actor_loss.detach()
+        data['critic_loss'] = critic_loss.detach()
 
 
 def train(config):
@@ -375,8 +397,7 @@ def train(config):
 
     # Training loop
     for episode in range(config['num_episodes']):
-        with torch.no_grad():
-            data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
+        data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
         ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config)
 
         # Logging
@@ -408,16 +429,17 @@ if __name__ == '__main__':
         'batch_size': 16,
         'num_episodes': 1000,
         'gamma': 0.99,
-        'learning_rate': 2e-5,
+        'gae_lambda': 0.95,  # Added GAE lambda parameter
+        'learning_rate': 1e-4,
         'max_steps': 16,
         'cross_cos_sim_threshold': 0.35,
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.06,
         'use_naturalness': False,
-        'num_epochs': 1,
-        'minibatch_size': 64,
-        'ppo_clip': 0.5,
+        'num_epochs': 4,
+        'minibatch_size': 32,
+        'ppo_clip': 0.4,  # Adjusted epsilon value to 0.2 (common in PPO)
         'eval_interval': 10,
         'model_name': 'Qwen/Qwen2-0.5B-Instruct'
     }
