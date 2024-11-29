@@ -211,7 +211,7 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
 
     # Compute rewards
     rewards_list = []
-    if False:
+    if True:
         for t in range(max_steps):
             if t == 0:
                 prev_cos_sim = torch.zeros_like(cos_sims_list[0])
@@ -293,7 +293,8 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
     max_steps = len(data['actions'])
     for i in range(batch_size):
         for t in range(max_steps):
-            states_list_flat.append(data['states'][i][:t+1])
+            # action here is the last token of the state, so the "t" step should not be included
+            states_list_flat.append(data['states'][i][:t])
             actions_list_flat.append(data['actions'][t][i])
             old_log_probs_list_flat.append(data['log_probs'][t][i])
             returns_list_flat.append(data['returns'][t][i])
@@ -439,7 +440,7 @@ if __name__ == '__main__':
         'use_naturalness': False,
         'num_epochs': 4,
         'minibatch_size': 32,
-        'ppo_clip': 0.4,  # Adjusted epsilon value to 0.2 (common in PPO)
+        'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
         'eval_interval': 10,
         'model_name': 'Qwen/Qwen2-0.5B-Instruct'
     }
