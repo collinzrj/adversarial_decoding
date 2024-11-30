@@ -15,6 +15,7 @@ import numpy as np
 from peft import LoraConfig, get_peft_model
 
 # Set device
+# torch.set_default_dtype(torch.bfloat16)
 device = 'cuda:0'
 
 def process_triggers_states(triggers, tokens_batch, tokenizer):
@@ -43,9 +44,9 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, actor_to
 class Actor(nn.Module):
     def __init__(self, tokenizer, model_name, use_lora=True):
         super(Actor, self).__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.get_default_dtype())
         self.temperature = 1.0
-        self.chunk_size = 64
+        self.chunk_size = 32
         self.tokenizer = tokenizer
 
         if use_lora:
@@ -55,7 +56,7 @@ class Actor(nn.Module):
                 bias="none",
                 task_type="CAUSAL_LM"
             )
-            self.llm = get_peft_model(self.llm, lora_config)
+            self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
 
     def forward(self, triggers, states):
         logits_list = []
@@ -63,18 +64,56 @@ class Actor(nn.Module):
         for i in range(0, len(triggers), self.chunk_size):
             chunk_triggers = triggers[i:i+self.chunk_size]
             chunk_states = states[i:i+self.chunk_size]
+            # print("actor tokens batch start", chunk_states)
             tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
+            # print("actor tokens batch", tokens_batch)
+            # print("actor tokens batch", self.tokenizer.batch_decode(tokens_batch))
             outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
             logits = outputs.logits[:, -1, :]
+            # print("original logits shape", outputs.logits.shape)
+            # print("original logits", outputs.logits)
+            # print("logits shape", logits.shape)
+            # print("logits", logits)
             probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+            # print("actor logits dtype", logits.dtype)
+            # print("probs logits dtype", probs.dtype)
+            # print("probs", probs)
             logits_list.append(logits)
             probs_list.append(probs)
         return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
+    
+
+class Critic(nn.Module):
+    def __init__(self, tokenizer, model_name, use_lora=True):
+        super(Critic, self).__init__()
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.get_default_dtype(), output_hidden_states=True)
+        # Value head to predict scalar value from hidden states
+        self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
+        self.tokenizer = tokenizer
+        if use_lora:
+            lora_config = LoraConfig(
+                r=16,
+                lora_alpha=32,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+            self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
+        
+    def forward(self, triggers, states):
+        tokens_batch, attention_mask = process_triggers_states(triggers, states, self.tokenizer)
+        outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
+        # Get hidden states from the last layer
+        hidden_states = outputs.hidden_states[-1]  # Shape: [batch_size, seq_len, hidden_size]
+        # Use the hidden state corresponding to the last token
+        last_hidden_state = hidden_states[:, -1, :]  # Shape: [batch_size, hidden_size]
+        # Compute the scalar value
+        value = self.value_head(last_hidden_state).squeeze(-1)  # Shape: [batch_size]
+        return value
 
 class EncoderCritic(nn.Module):
     def __init__(self, actor_tokenizer, critic_tokenizer):
         super(EncoderCritic, self).__init__()
-        self.encoder = AutoModel.from_pretrained("facebook/contriever", output_hidden_states=True)
+        self.encoder = AutoModel.from_pretrained("facebook/contriever", torch_dtype=torch.get_default_dtype(), output_hidden_states=True)
         self.value_head = nn.Linear(self.encoder.config.hidden_size, 1)
         self.actor_tokenizer = actor_tokenizer
         self.critic_tokenizer = critic_tokenizer
@@ -93,11 +132,11 @@ class RewardModel(nn.Module):
         ds = load_dataset("microsoft/ms_marco", "v1.1")
         queries = ds['train']['query']
         random_queries = random.sample(queries, 128)
-        self.encoder = SentenceTransformer("facebook/contriever", device=device)
+        self.encoder = SentenceTransformer("facebook/contriever", device=device, model_kwargs={'torch_dtype': torch.get_default_dtype()})
         self.trigger_dict = {}
         self.use_naturalness = use_naturalness
         if use_naturalness:
-            self.naturalness_llm = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct').to('cuda:1')
+            self.naturalness_llm = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct', torch_dtype=torch.get_default_dtype()).to('cuda:1')
             self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct')
         path_name = 'trigger_dict.pt'
         if not os.path.exists(path_name):
@@ -109,6 +148,8 @@ class RewardModel(nn.Module):
                 pickle.dump(self.trigger_dict, f)
         with open(path_name, 'rb') as f:
             self.trigger_dict = pickle.load(f)
+            for k in self.trigger_dict:
+                self.trigger_dict[k] = self.trigger_dict[k].to(torch.get_default_dtype())
 
     def forward(self, triggers, sentences):
         assert len(triggers) == len(sentences)
@@ -211,34 +252,23 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
 
     # Compute rewards
     rewards_list = []
-    if True:
-        for t in range(max_steps):
-            if t == 0:
-                prev_cos_sim = torch.zeros_like(cos_sims_list[0])
-            else:
-                prev_cos_sim = cos_sims_list[t-1]
-            incremental_reward = cos_sims_list[t] - prev_cos_sim
-            # Subtract cross cosine similarity as a penalty
-            # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
-            rewards_list.append(incremental_reward)
-    else:
-        for t in range(max_steps):
-            if t == 0:
-                prev_cos_sim = torch.zeros_like(cos_sims_list[0])
-            else:
-                prev_cos_sim = cos_sims_list[t-1]
-            if t == max_steps - 1:
-                incremental_reward = cos_sims_list[t]
-            else:
-                incremental_reward = cos_sims_list[t] * 0.1
-            # Subtract cross cosine similarity as a penalty
-            # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
-            rewards_list.append(incremental_reward)
+    for t in range(max_steps):
+        if t == 0:
+            prev_cos_sim = torch.zeros_like(cos_sims_list[0])
+        else:
+            prev_cos_sim = cos_sims_list[t-1]
+        incremental_reward = cos_sims_list[t] - prev_cos_sim
+        # Subtract cross cosine similarity as a penalty
+        # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
+        rewards_list.append(incremental_reward)
+
 
     # If using naturalness scores, we can add them to the final reward
+    actual_naturalness_list = None
     if reward_model.use_naturalness:
         final_texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
         naturalness_scores = reward_model.compute_naturalness_small_batch(final_texts)
+        actual_naturalness_list = naturalness_scores
         naturalness_scores = torch.clamp(naturalness_scores, max=naturalness_threshold) * naturalness_coef
         rewards_list[-1] += naturalness_scores
 
@@ -272,14 +302,17 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         'advantages': advantages,
         'triggers': current_triggers,
         'cos_sims': cos_sims_list[-1],
+        'cross_cos_sims': cross_cos_sims[-1],
         'texts': texts_list[-1],
         'max_cos_sim': reward_model.get_max_cos_sim(current_triggers),
+        'naturalness_list': actual_naturalness_list
     }
 
 def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
     num_epochs = config['num_epochs']
     minibatch_size = config['minibatch_size']
     epsilon = config['ppo_clip']
+    entropy_coef = config['entropy_coef']  # NEW: Get entropy coefficient from config
 
     # Flatten data
     states_list_flat = []
@@ -314,6 +347,7 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
         collected_mb_old_log_probs = []
         collected_values = []
         collected_mb_returns = []
+        collected_entropy = []  # NEW: Initialize list to collect entropy
 
         for start in tqdm(range(0, total_samples, minibatch_size), desc=f"PPO Epoch {epoch+1}"):
             end = start + minibatch_size
@@ -331,7 +365,9 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
             # Create a Categorical distribution and compute new log probabilities
             m = Categorical(probs)
             new_log_probs = m.log_prob(mb_actions)
-            
+            entropy = m.entropy()  # NEW: Compute entropy
+            collected_entropy.append(entropy)  # NEW: Collect entropy
+
             # Collect data for later loss computation
             collected_new_log_probs.append(new_log_probs)
             collected_mb_advantages.append(mb_advantages)
@@ -348,12 +384,14 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
         all_mb_old_log_probs = torch.cat(collected_mb_old_log_probs, dim=0)
         all_values = torch.cat(collected_values, dim=0)
         all_mb_returns = torch.cat(collected_mb_returns, dim=0)
+        all_entropy = torch.cat(collected_entropy, dim=0)  # NEW: Concatenate entropy
 
         # Compute PPO loss for the actor
         ratio = torch.exp(all_new_log_probs - all_mb_old_log_probs)
         surr1 = ratio * all_mb_advantages
         surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * all_mb_advantages
-        actor_loss = -torch.min(surr1, surr2).mean()
+        # NEW: Include entropy bonus in actor loss
+        actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(all_entropy, max=3)).mean()
 
         # Compute value loss for the critic
         critic_loss = nn.functional.mse_loss(all_values, all_mb_returns)
@@ -367,7 +405,7 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
         # Logging average losses
         data['actor_loss'] = actor_loss.detach()
         data['critic_loss'] = critic_loss.detach()
-
+        data['entropy'] = all_entropy.mean()
 
 def train(config):
     # Initialize tokenizers and models
@@ -390,7 +428,8 @@ def train(config):
     # Initialize models
     reward_model = RewardModel(train_triggers + test_triggers, config['use_naturalness'])
     actor = Actor(actor_tokenizer, config['model_name']).to(device)
-    critic = EncoderCritic(actor_tokenizer, critic_tokenizer).to(device)
+    critic = Critic(actor_tokenizer, config['model_name']).to(device)
+    # critic = EncoderCritic(actor_tokenizer, critic_tokenizer).to(device)
 
     # Optimizer
     actor_optimizer = optim.Adam(actor.parameters(), lr=config['learning_rate'])
@@ -407,28 +446,39 @@ def train(config):
             'actor_loss': data['actor_loss'].item(),
             'critic_loss': data['critic_loss'].item(),
             'mean_train_cos_sim': data['cos_sims'].mean().item(),
+            'mean_cross_cos_sims': data['cross_cos_sims'].mean().item(),
             'max_possible_cos_sim': data['max_cos_sim'].mean().item(),
+            'entropy': data['entropy'].item(),
+            'train_generated_texts': wandb.Table(columns=['Episode', 'Trigger', 'Cosine Similarity', 'Generated Text'],
+                                                data=list(zip([episode + 1 for _ in range(config['batch_size'])], data['triggers'], data['cos_sims'], actor_tokenizer.batch_decode(data['states']))))
         }
-        wandb.log(log_data)
-
+        if reward_model.use_naturalness:
+            log_data = log_data | {
+                'naturalness_list': data['naturalness_list'].mean().item()
+            }
+        commit = True
+        if (episode + 1) % config['eval_interval'] == 0:
+            commit = False
+        wandb.log(log_data, commit=commit)
         # Print progress
         print(f"Episode {episode+1}, Actor Loss: {log_data['actor_loss']:.4f}, Critic Loss: {log_data['critic_loss']:.4f}")
 
         # Evaluate periodically
         if (episode + 1) % config['eval_interval'] == 0:
+            num_test_trig = len(test_triggers)
             cos_sims, texts = evaluate(actor, reward_model, test_triggers, config['max_steps'], actor_tokenizer)
             wandb.log({
                 'mean_test_cos_sim': cos_sims.mean().item(),
-                'test_generated_texts': wandb.Table(columns=['Trigger', 'Cosine Similarity', 'Generated Text'],
-                                                    data=list(zip(test_triggers, cos_sims.cpu().numpy(), texts)))
+                'test_generated_texts': wandb.Table(columns=['Episode', 'Trigger', 'Cosine Similarity', 'Generated Text'],
+                                                    data=list(zip([episode + 1 for _ in range(num_test_trig)], test_triggers, cos_sims, texts)))
             })
             torch.save(actor.state_dict(), f"actor.pth")
             torch.save(critic.state_dict(), f"critic.pth")
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 16,
-        'num_episodes': 1000,
+        'batch_size': 8,
+        'num_episodes': 10000,
         'gamma': 0.99,
         'gae_lambda': 0.95,  # Added GAE lambda parameter
         'learning_rate': 1e-4,
@@ -436,13 +486,15 @@ if __name__ == '__main__':
         'cross_cos_sim_threshold': 0.35,
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
-        'naturalness_threshold': 0.06,
-        'use_naturalness': False,
-        'num_epochs': 4,
+        'naturalness_threshold': 0.05,
+        'use_naturalness': True,
+        'num_epochs': 10,
         'minibatch_size': 32,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
+        'entropy_coef': 0.025,  # NEW: Entropy coefficient
         'eval_interval': 10,
         'model_name': 'Qwen/Qwen2-0.5B-Instruct'
+        # 'model_name': 'meta-llama/Llama-3.2-3B-Instruct'
     }
     wandb.init(project='ppo_attack', config=config)
     train(config)
