@@ -308,11 +308,11 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         'naturalness_list': actual_naturalness_list
     }
 
-def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
+def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only=False):
     num_epochs = config['num_epochs']
     minibatch_size = config['minibatch_size']
     epsilon = config['ppo_clip']
-    entropy_coef = config['entropy_coef']  # NEW: Get entropy coefficient from config
+    entropy_coef = config['entropy_coef']  # Entropy coefficient from config
 
     # Flatten data
     states_list_flat = []
@@ -326,7 +326,6 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
     max_steps = len(data['actions'])
     for i in range(batch_size):
         for t in range(max_steps):
-            # action here is the last token of the state, so the "t" step should not be included
             states_list_flat.append(data['states'][i][:t])
             actions_list_flat.append(data['actions'][t][i])
             old_log_probs_list_flat.append(data['log_probs'][t][i])
@@ -336,18 +335,12 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
 
     total_samples = len(states_list_flat)
     indices = np.arange(total_samples)
-    for epoch in range(num_epochs):
-        actor_optimizer.zero_grad()
-        critic_optimizer.zero_grad()
-        np.random.shuffle(indices)
 
-        # Initialize lists to collect data
-        collected_new_log_probs = []
-        collected_mb_advantages = []
-        collected_mb_old_log_probs = []
-        collected_values = []
-        collected_mb_returns = []
-        collected_entropy = []  # NEW: Initialize list to collect entropy
+    actor_loss_list = []
+    critic_loss_list = []
+    entropy_list = []
+    for epoch in range(num_epochs):
+        np.random.shuffle(indices)
 
         for start in tqdm(range(0, total_samples, minibatch_size), desc=f"PPO Epoch {epoch+1}"):
             end = start + minibatch_size
@@ -359,53 +352,44 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config):
             mb_advantages = torch.tensor([advantages_list_flat[idx] for idx in mb_indices], device=device)
             mb_triggers = [triggers_list_flat[idx] for idx in mb_indices]
 
-            # Forward pass through actor to get current probabilities
-            logits, probs = actor(mb_triggers, mb_states)
-            
-            # Create a Categorical distribution and compute new log probabilities
-            m = Categorical(probs)
-            new_log_probs = m.log_prob(mb_actions)
-            entropy = m.entropy()  # NEW: Compute entropy
-            collected_entropy.append(entropy)  # NEW: Collect entropy
+            if not critic_only:
+                # Forward pass through actor to get current probabilities
+                logits, probs = actor(mb_triggers, mb_states)
+                
+                # Create a Categorical distribution and compute new log probabilities
+                m = Categorical(probs)
+                new_log_probs = m.log_prob(mb_actions)
+                entropy = m.entropy()
 
-            # Collect data for later loss computation
-            collected_new_log_probs.append(new_log_probs)
-            collected_mb_advantages.append(mb_advantages)
-            collected_mb_old_log_probs.append(mb_old_log_probs)
+                # Compute PPO loss for the actor
+                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                surr1 = ratio * mb_advantages
+                surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * mb_advantages
+                actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=3)).mean()
+
+                actor_loss_list.append(actor_loss)
+                entropy_list.append(entropy.mean())
+            
+                # Backpropagate and optimize
+                actor_optimizer.zero_grad()
+                actor_loss.backward()
+                actor_optimizer.step()
+                
 
             # Forward pass through critic
             values = critic(mb_triggers, mb_states)
-            collected_values.append(values)
-            collected_mb_returns.append(mb_returns)
+            critic_loss = nn.functional.mse_loss(values, mb_returns)
 
-        # Concatenate all collected data
-        all_new_log_probs = torch.cat(collected_new_log_probs, dim=0)
-        all_mb_advantages = torch.cat(collected_mb_advantages, dim=0)
-        all_mb_old_log_probs = torch.cat(collected_mb_old_log_probs, dim=0)
-        all_values = torch.cat(collected_values, dim=0)
-        all_mb_returns = torch.cat(collected_mb_returns, dim=0)
-        all_entropy = torch.cat(collected_entropy, dim=0)  # NEW: Concatenate entropy
+            critic_optimizer.zero_grad()
+            critic_loss.backward()
+            critic_optimizer.step()
+            critic_loss_list.append(critic_loss)
 
-        # Compute PPO loss for the actor
-        ratio = torch.exp(all_new_log_probs - all_mb_old_log_probs)
-        surr1 = ratio * all_mb_advantages
-        surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * all_mb_advantages
-        # NEW: Include entropy bonus in actor loss
-        actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(all_entropy, max=3)).mean()
-
-        # Compute value loss for the critic
-        critic_loss = nn.functional.mse_loss(all_values, all_mb_returns)
-
-        # Backpropagate and optimize
-        actor_loss.backward()
-        actor_optimizer.step()
-        critic_loss.backward()
-        critic_optimizer.step()
-
-        # Logging average losses
-        data['actor_loss'] = actor_loss.detach()
-        data['critic_loss'] = critic_loss.detach()
-        data['entropy'] = all_entropy.mean()
+    # Logging average metrics for this epoch (optional)
+    data['critic_loss'] = torch.tensor(critic_loss_list).mean().detach()
+    if not critic_only:
+        data['actor_loss'] = torch.tensor(actor_loss_list).mean().detach()
+        data['entropy'] = torch.tensor(entropy_list).mean().detach()
 
 def train(config):
     # Initialize tokenizers and models
@@ -437,18 +421,20 @@ def train(config):
 
     # Training loop
     for episode in range(config['num_episodes']):
-        data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
-        ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config)
+        with torch.no_grad():
+            data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
+        critic_only = False
+        if episode < 300:
+            critic_only = True
+        ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only)
 
         # Logging
         log_data = {
             'episode': episode + 1,
-            'actor_loss': data['actor_loss'].item(),
             'critic_loss': data['critic_loss'].item(),
             'mean_train_cos_sim': data['cos_sims'].mean().item(),
             'mean_cross_cos_sims': data['cross_cos_sims'].mean().item(),
             'max_possible_cos_sim': data['max_cos_sim'].mean().item(),
-            'entropy': data['entropy'].item(),
             'train_generated_texts': wandb.Table(columns=['Episode', 'Trigger', 'Cosine Similarity', 'Generated Text'],
                                                 data=list(zip([episode + 1 for _ in range(config['batch_size'])], data['triggers'], data['cos_sims'], actor_tokenizer.batch_decode(data['states']))))
         }
@@ -456,12 +442,17 @@ def train(config):
             log_data = log_data | {
                 'naturalness_list': data['naturalness_list'].mean().item()
             }
+        if not critic_only:
+            log_data = log_data | {
+                'actor_loss': data['actor_loss'].item(),
+                'entropy': data['entropy'].item(),
+            }
         commit = True
         if (episode + 1) % config['eval_interval'] == 0:
             commit = False
         wandb.log(log_data, commit=commit)
         # Print progress
-        print(f"Episode {episode+1}, Actor Loss: {log_data['actor_loss']:.4f}, Critic Loss: {log_data['critic_loss']:.4f}")
+        # print(f"Episode {episode+1}, Actor Loss: {log_data['actor_loss']:.4f}, Critic Loss: {log_data['critic_loss']:.4f}")
 
         # Evaluate periodically
         if (episode + 1) % config['eval_interval'] == 0:
@@ -481,7 +472,7 @@ if __name__ == '__main__':
         'num_episodes': 10000,
         'gamma': 0.99,
         'gae_lambda': 0.95,  # Added GAE lambda parameter
-        'learning_rate': 1e-4,
+        'learning_rate': 1e-5,
         'max_steps': 16,
         'cross_cos_sim_threshold': 0.35,
         'naturalness_coef': 4,
@@ -493,7 +484,7 @@ if __name__ == '__main__':
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
         'entropy_coef': 0.025,  # NEW: Entropy coefficient
         'eval_interval': 10,
-        'model_name': 'Qwen/Qwen2-0.5B-Instruct'
+        'model_name': 'Qwen/Qwen2.5-3B-Instruct'
         # 'model_name': 'meta-llama/Llama-3.2-3B-Instruct'
     }
     wandb.init(project='ppo_attack', config=config)

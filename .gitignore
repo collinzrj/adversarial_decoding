@@ -7,3 +7,5 @@ collision
 *.json
 models/*
 wandb
+*.pth
+*.pt
