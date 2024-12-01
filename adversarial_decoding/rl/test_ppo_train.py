@@ -58,6 +58,13 @@ class Actor(nn.Module):
             )
             self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
 
+    def forward_with_past(self, input_ids, attention_mask, past_key_values=None):
+        outputs = self.llm(input_ids=input_ids, attention_mask=attention_mask, use_cache=True, past_key_values=past_key_values)
+        logits = outputs.logits[:, -1, :]  # Get logits for the last token
+        probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+        past_key_values = outputs.past_key_values  # Update past_key_values
+        return logits, probs, past_key_values
+
     def forward(self, triggers, states, all_logits=False):
         logits_list = []
         probs_list = []
@@ -95,6 +102,13 @@ class Critic(nn.Module):
                 task_type="CAUSAL_LM"
             )
             self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
+    
+    def forward_with_past(self, input_ids, attention_mask, past_key_values=None):
+        outputs = self.llm(input_ids=input_ids, attention_mask=attention_mask, use_cache=True, past_key_values=past_key_values)
+        hidden_states = outputs.hidden_states[-1]
+        last_hidden_state = hidden_states[:, -1, :]
+        value = self.value_head(last_hidden_state).squeeze(-1)
+        return value
         
     def forward(self, triggers, states, all_logits=False):
         tokens_batch, attention_mask = process_triggers_states(triggers, states, self.tokenizer)
@@ -226,6 +240,8 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
 
     # Sample triggers
     current_triggers = [random.choice(triggers) for _ in range(batch_size)]
+    
+    # Initialize states and past_key_values
     states = [[] for _ in range(batch_size)]
     log_probs_list = []
     values_list = []
@@ -234,22 +250,48 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
     actions_list = []
     texts_list = []
 
+    # Process triggers to get initial tokens and attention masks
+    prefix_texts = [f"Describe {trigger}:" for trigger in current_triggers]
+    prefix_tokens = actor_tokenizer(prefix_texts, add_special_tokens=False, return_tensors='pt', padding=True)
+    tokens_batch = prefix_tokens['input_ids'].to(device)  # Shape: (batch_size, seq_len)
+    attention_mask = prefix_tokens['attention_mask'].to(device)
+    past_key_values = None  # Initialize past_key_values
+
     for t in range(max_steps):
-        values = critic(current_triggers, states)
+        # Get logits, probs, and update past_key_values using kv cache        
+        values = critic.forward_with_past(tokens_batch, attention_mask, past_key_values)
         values_list.append(values)
-        logits, probs = actor(current_triggers, states)
+
+        logits, probs, past_key_values = actor.forward_with_past(tokens_batch, attention_mask, past_key_values)
+        test_logits, test_probs = actor(current_triggers, states)
+        print('logits diff', torch.sum(logits-test_logits))
+        print('probs diff', torch.sum(probs-test_probs))
         m = Categorical(probs)
         actions = m.sample()
         log_probs = m.log_prob(actions)
         log_probs_list.append(log_probs)
         actions_list.append(actions)
+
+        # Update tokens_batch with the new actions (tokens)
+        tokens_batch = actions.unsqueeze(-1)  # Shape: (batch_size, 1)
+        attention_mask = torch.ones_like(tokens_batch).to(device)  # Since we're adding one token at a time
+
+
+        # Update states
         for i in range(batch_size):
             states[i].append(actions[i].item())
-        texts = actor_tokenizer.batch_decode(states, skip_special_tokens=True)
+
+        # Since critic evaluates the whole sequence, we can process it separately if needed
+        # For demonstration, we'll skip kv caching for the critic in this example
+
+        # Get texts and compute rewards
+        texts = actor_tokenizer.batch_decode([s for s in states], skip_special_tokens=True)
         texts_list.append(texts)
         cos_sims, cross_cos_sims = reward_model(current_triggers, texts)
         cos_sims_list.append(cos_sims)
         cross_cos_sims_list.append(cross_cos_sims)
+
+    exit()
 
     # Compute rewards
     rewards_list = []
@@ -274,8 +316,7 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         rewards_list[-1] += naturalness_scores
 
     # Collect terminal values
-    with torch.no_grad():
-        final_values = critic(current_triggers, states)
+    final_values = critic.forward_with_past(tokens_batch, attention_mask, past_key_values)
     values_list.append(final_values)  # Now values_list has length max_steps + 1
 
     # Convert lists to tensors
@@ -333,7 +374,7 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, c
             entropy = m.entropy()
 
             ratio = torch.exp(new_log_probs - flatten_old_log_probs)
-            # print(f'{epoch}, difference {torch.sum(new_log_probs - flatten_old_log_probs)}', flush=True)
+            print(f'{epoch}, difference {torch.sum(new_log_probs - flatten_old_log_probs)}', flush=True)
             surr1 = ratio * flatten_advantages
             surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * flatten_advantages
             actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=config['entropy_threshold'])).mean()
@@ -389,7 +430,7 @@ def train(config):
 
     # Optimizer
     actor_optimizer = optim.Adam(actor.parameters(), lr=config['learning_rate'] * 10)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'])
+    critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'] * 10)
     scheduler = optim.lr_scheduler.StepLR(critic_optimizer, 1, gamma=0.1)
 
     # Training loop
@@ -397,10 +438,11 @@ def train(config):
         with torch.no_grad():
             data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
         critic_only = False
-        # if episode < 0:
-        #     critic_only = True
-        # if episode == 0:
-        #     scheduler.step()
+        critic_only_episodes = 0
+        if episode < critic_only_episodes:
+            critic_only = True
+        if episode == critic_only_episodes:
+            scheduler.step()
         ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only)
 
         # Logging
@@ -453,7 +495,7 @@ if __name__ == '__main__':
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.05,
-        'use_naturalness': True,
+        'use_naturalness': False,
         'num_epochs': 4,
         'minibatch_size': 32,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
