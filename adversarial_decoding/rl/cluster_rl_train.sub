@@ -9,6 +9,6 @@
 #SBATCH --get-user-env                       # retrieve the users login environment
 #SBATCH --mem=100G                            # server memory requested (per node)
 #SBATCH --partition=shmatikov                # Request partition
-#SBATCH --gres=gpu:a40:1                  # Type/number of GPUs needed
+#SBATCH --gres=gpu:a40:2                  # Type/number of GPUs needed
 #SBATCH -t 2400:00:00
 python ppo_train.py

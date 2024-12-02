@@ -292,8 +292,8 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
     actions_list = []
     texts_list = []
 
+    start_time = time.time()
     for t in range(max_steps):
-        values = critic(current_triggers, states)
         if use_kv_cache:
             values = critic.forward_kv_cache(current_triggers, states)
         else:
@@ -303,7 +303,6 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
             _, probs = actor.forward_kv_cache(current_triggers, states)
         else:
             _, probs = actor(current_triggers, states)
-        # print(f"Step {t}, logits diff: {torch.sum((logits - debug_logits) ** 2)}, probs diff: {torch.sum((probs - debug_probs) ** 2)}")
         m = Categorical(probs)
         actions = m.sample()
         log_probs = m.log_prob(actions)
@@ -316,6 +315,10 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
         cos_sims, cross_cos_sims = reward_model(current_triggers, texts)
         cos_sims_list.append(cos_sims)
         cross_cos_sims_list.append(cross_cos_sims)
+        reward_time = time.time() - start_time
+    action_time = time.time() - start_time
+
+    start_time = time.time()
     # Collect terminal values
     if use_kv_cache:
         final_values = critic.forward_kv_cache(current_triggers, states)
@@ -325,7 +328,9 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
     else:
         final_values = critic(current_triggers, states)
     values_list.append(final_values)  # Now values_list has length max_steps + 1
+    terminal_value_time = time.time() - start_time
 
+    start_time = time.time()
     # Compute rewards
     rewards_list = []
     for t in range(max_steps):
@@ -334,11 +339,10 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
         else:
             prev_cos_sim = cos_sims_list[t-1]
         incremental_reward = cos_sims_list[t] - prev_cos_sim
-        # Subtract cross cosine similarity as a penalty
-        # incremental_reward -= cross_cos_sim_coef * cross_cos_sims_list[t]
         rewards_list.append(incremental_reward)
+    reward_time = time.time() - start_time
 
-
+    start_time = time.time()
     # If using naturalness scores, we can add them to the final reward
     actual_naturalness_list = None
     if reward_model.use_naturalness:
@@ -347,7 +351,9 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
         actual_naturalness_list = naturalness_scores
         naturalness_scores = torch.clamp(naturalness_scores, max=naturalness_threshold) * naturalness_coef
         rewards_list[-1] += naturalness_scores
+    naturalness_time = time.time() - start_time
 
+    start_time = time.time()
     # Convert lists to tensors
     rewards_tensor = torch.stack(rewards_list)  # Shape: (max_steps, batch_size)
     values_tensor = torch.stack(values_list)    # Shape: (max_steps + 1, batch_size)
@@ -363,6 +369,9 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
 
     # Normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    gae_time = time.time() - start_time
+
+    print(f"Action time: {action_time:.4f}s, Terminal value time: {terminal_value_time:.4f}s, Reward time: {reward_time:.4f}s, Naturalness time: {naturalness_time:.4f}s, GAE time: {gae_time:.4f}s")
 
     return {
         'states': states,
@@ -471,11 +480,6 @@ def train(config):
         collect_time = time.time() - start_time
 
         start_time = time.time()
-        with torch.no_grad():
-            data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config, use_kv_cache=False)
-        no_cache_collect_time = time.time() - start_time
-
-        start_time = time.time()
         critic_only = False
         ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only)
         update_time = time.time() - start_time
@@ -519,7 +523,7 @@ def train(config):
             torch.save(actor, f"actor.pth")
             torch.save(critic, f"critic.pth")
         logging_time = time.time() - start_time
-        print('Collect time:', collect_time, 'No Cache Collect time:', no_cache_collect_time, 'Update time:', update_time, 'Logging time:', logging_time)
+        print('Collect time:', collect_time, 'Update time:', update_time, 'Logging time:', logging_time)
 
 if __name__ == '__main__':
     config = {
@@ -533,7 +537,7 @@ if __name__ == '__main__':
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.05,
-        'use_naturalness': False,
+        'use_naturalness': True,
         'num_epochs': 4,
         'minibatch_size': 32,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
