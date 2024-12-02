@@ -374,18 +374,17 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
     print(f"Action time: {action_time:.4f}s, Terminal value time: {terminal_value_time:.4f}s, Reward time: {reward_time:.4f}s, Naturalness time: {naturalness_time:.4f}s, GAE time: {gae_time:.4f}s")
 
     return {
-        'states': states,
-        'actions': actions_list, # Shape: (max_steps, batch_size)
-        'log_probs': log_probs_list, # Shape: (max_steps, batch_size)
-        'values': values_list[:-1],
-        'returns': returns,
-        'advantages': advantages, # Shape: (max_steps, batch_size)
-        'triggers': current_triggers,
-        'cos_sims': cos_sims_list[-1],
-        'cross_cos_sims': cross_cos_sims[-1],
-        'texts': texts_list[-1],
-        'max_cos_sim': reward_model.get_max_cos_sim(current_triggers),
-        'naturalness_list': actual_naturalness_list
+        'states': states, # Shape: (batch_size)
+        'actions': torch.stack(actions_list).t(), # Shape: (batch_size, max_steps)
+        'log_probs': torch.stack(log_probs_list).t(), # Shape: (batch_size, max_steps)
+        'returns': returns.t(), # Shape: (batch_size, max_steps)
+        'advantages': advantages.t(), # Shape: (batch_size, max_steps)
+        'triggers': current_triggers, # Shape: (batch_size)
+        'cos_sims': cos_sims_list[-1], # Shape: (batch_size)
+        'cross_cos_sims': cross_cos_sims[-1], # Shape: (batch_size)
+        'texts': texts_list[-1], # Shape: (batch_size)
+        'max_cos_sim': reward_model.get_max_cos_sim(current_triggers), # Shape: (batch_size)
+        'naturalness_list': actual_naturalness_list # Shape: (batch_size)
     }
 
 def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only=False):
@@ -396,43 +395,43 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, c
     actor_loss_list = []
     critic_loss_list = []
     entropy_list = []
+    mb_size = config['minibatch_size']
     for epoch in range(num_epochs):
+        for i in range(0, config['batch_size'], mb_size):
+            mb_flatten_advantages = data['advantages'][i:i+mb_size].reshape(-1)
+            mb_flatten_old_log_probs = data['log_probs'][i:i+mb_size].reshape(-1)
+            mb_flatten_actions = data['actions'][i:i+mb_size].reshape(-1)
+            mb_triggers = data['triggers'][i:i+mb_size]
+            mb_states = data['states'][i:i+mb_size]
+            mb_returns = data['returns'][i:i+mb_size]
+            if not critic_only:
+                logits, probs = actor(mb_triggers, mb_states, all_logits=True) # Shape: (batch_size, max_steps, vocab_size)
+                mb_flatten_probs = probs.reshape((-1, probs.size(-1)))
+                m = Categorical(mb_flatten_probs)
+                mb_new_log_probs = m.log_prob(mb_flatten_actions)
+                entropy = m.entropy()
 
-        flatten_advantages = data['advantages'].view((-1))
-        old_log_probs = torch.stack(data['log_probs']) # Shape: (max_steps, batch_size)
-        flatten_old_log_probs = old_log_probs.view((-1))
-        flatten_actions = torch.stack(data['actions']).view(-1) # Shape: (max_steps, batch_size)
+                ratio = torch.exp(mb_new_log_probs - mb_flatten_old_log_probs)
+                # print(f'{epoch}, difference {torch.sum(new_log_probs - flatten_old_log_probs)}', flush=True)
+                surr1 = ratio * mb_flatten_advantages
+                surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * mb_flatten_advantages
+                # actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=config['entropy_threshold'])).mean()
+                actor_loss = (-torch.min(surr1, surr2)).mean()
 
-        if not critic_only:
-            logits, probs = actor(data['triggers'], data['states'], all_logits=True) # Shape: (batch_size, max_steps, vocab_size)
-            probs = torch.permute(probs, (1, 0, 2)) # Shape: (max_steps, batch_size, vocab_size)
-            flatten_probs = probs.reshape((-1, probs.size(-1)))
-            m = Categorical(flatten_probs)
-            new_log_probs = m.log_prob(flatten_actions) 
-            entropy = m.entropy()
+                actor_optimizer.zero_grad()
+                actor_loss.backward()
+                actor_optimizer.step()
 
-            ratio = torch.exp(new_log_probs - flatten_old_log_probs)
-            # print(f'{epoch}, difference {torch.sum(new_log_probs - flatten_old_log_probs)}', flush=True)
-            surr1 = ratio * flatten_advantages
-            surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * flatten_advantages
-            # actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=config['entropy_threshold'])).mean()
-            actor_loss = (-torch.min(surr1, surr2)).mean()
+                actor_loss_list.append(actor_loss)
+                entropy_list.append(entropy)
 
-            actor_optimizer.zero_grad()
-            actor_loss.backward()
-            actor_optimizer.step()
+            mb_values = critic(mb_triggers, mb_states, all_logits=True) # Shape: (batch_size, max_steps)
+            critic_loss = nn.functional.mse_loss(mb_values, mb_returns)
 
-            actor_loss_list.append(actor_loss)
-            entropy_list.append(entropy)
-
-        values = critic(data['triggers'], data['states'], all_logits=True) # Shape: (batch_size, max_steps)
-        values = torch.permute(values, (1, 0))
-        critic_loss = nn.functional.mse_loss(values, data['returns'])
-
-        critic_optimizer.zero_grad()
-        critic_loss.backward()
-        critic_optimizer.step()
-        critic_loss_list.append(critic_loss)
+            critic_optimizer.zero_grad()
+            critic_loss.backward()
+            critic_optimizer.step()
+            critic_loss_list.append(critic_loss)
 
     # Logging average metrics for this epoch (optional)
     data['critic_loss'] = torch.tensor(critic_loss_list).mean().detach()
@@ -527,7 +526,7 @@ def train(config):
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 8,
+        'batch_size': 32,
         'num_episodes': 10000,
         'gamma': 0.99,
         'gae_lambda': 0.95,  # Added GAE lambda parameter
@@ -539,7 +538,7 @@ if __name__ == '__main__':
         'naturalness_threshold': 0.05,
         'use_naturalness': True,
         'num_epochs': 4,
-        'minibatch_size': 32,
+        'minibatch_size': 8,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
         'entropy_threshold': 2,
         'entropy_coef': 0.025,  # NEW: Entropy coefficient
