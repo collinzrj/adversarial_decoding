@@ -3,7 +3,8 @@ import json
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel, Qwen2ForCausalLM
+from transformers.cache_utils import DynamicCache
 from datasets import load_dataset
 import random
 from tqdm import tqdm
@@ -13,6 +14,7 @@ import copy
 import pandas as pd
 import numpy as np
 from peft import LoraConfig, get_peft_model
+import time
 
 # Set device
 # torch.set_default_dtype(torch.bfloat16)
@@ -57,17 +59,15 @@ class Actor(nn.Module):
                 task_type="CAUSAL_LM"
             )
             self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
+        self.kv_cache = None
 
-    def forward(self, triggers, states, all_logits=False):
+    def forward(self, triggers, states, all_logits=False, use_kv_cache=True):
         logits_list = []
         probs_list = []
         for i in range(0, len(triggers), self.chunk_size):
             chunk_triggers = triggers[i:i+self.chunk_size]
             chunk_states = states[i:i+self.chunk_size]
-            # print("actor tokens batch start", chunk_states)
             tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
-            # print("actor tokens batch", tokens_batch)
-            # print("actor tokens batch", self.tokenizer.batch_decode(tokens_batch))
             outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
             if all_logits:
                 logits = outputs.logits[:, -1-len(states[0]):-1, :]
@@ -78,15 +78,45 @@ class Actor(nn.Module):
             logits_list.append(logits)
             probs_list.append(probs)
         return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
+
+    def forward_kv_cache(self, triggers, states):
+        logits_list = []
+        probs_list = []
+        for i in range(0, len(triggers), self.chunk_size):
+            chunk_triggers = triggers[i:i+self.chunk_size]
+            chunk_states = states[i:i+self.chunk_size]
+            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
+            if self.kv_cache is None:
+                # Initialize the KV cache with the full sequence
+                outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask, use_cache=True, past_key_values=DynamicCache())
+                self.kv_cache = outputs.past_key_values
+            else:
+                # Extract the new token (assuming it's the last token in the sequence)
+                new_token = tokens_batch[:, -1].unsqueeze(-1)
+                outputs = self.llm(
+                    input_ids=new_token,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=self.kv_cache
+                )
+                # Update the KV cache with the new entries (old cache plus new)
+                self.kv_cache = outputs.past_key_values
+            # Compute logits and probabilities for the new token
+            logits = outputs.logits[:, -1, :]
+            probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+            logits_list.append(logits)
+            probs_list.append(probs)
+        return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
     
 
 class Critic(nn.Module):
-    def __init__(self, tokenizer, model_name, use_lora=False):
+    def __init__(self, tokenizer, model_name, use_lora=True):
         super(Critic, self).__init__()
         self.llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.get_default_dtype(), output_hidden_states=True)
         # Value head to predict scalar value from hidden states
         self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
         self.tokenizer = tokenizer
+        self.chunk_size = 32
         if use_lora:
             lora_config = LoraConfig(
                 r=16,
@@ -95,6 +125,7 @@ class Critic(nn.Module):
                 task_type="CAUSAL_LM"
             )
             self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
+        self.kv_cache = None
         
     def forward(self, triggers, states, all_logits=False):
         tokens_batch, attention_mask = process_triggers_states(triggers, states, self.tokenizer)
@@ -110,6 +141,33 @@ class Critic(nn.Module):
             # Compute the scalar value
             value = self.value_head(last_hidden_state).squeeze(-1)  # Shape: [batch_size]
         return value
+    
+    def forward_kv_cache(self, triggers, states):
+        values_list = []
+        for i in range(0, len(triggers), self.chunk_size):
+            chunk_triggers = triggers[i:i+self.chunk_size]
+            chunk_states = states[i:i+self.chunk_size]
+            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
+            if self.kv_cache is None:
+                # Initialize the KV cache with the full sequence
+                outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask, use_cache=True, past_key_values=DynamicCache())
+                self.kv_cache = outputs.past_key_values
+            else:
+                # Extract the new token (assuming it's the last token in the sequence)
+                new_token = tokens_batch[:, -1].unsqueeze(-1)
+                outputs = self.llm(
+                    input_ids=new_token,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=self.kv_cache
+                )
+                # Update the KV cache with the new entries (old cache plus new)
+                self.kv_cache = outputs.past_key_values
+            # Compute logits and probabilities for the new token
+            last_hidden_state = outputs.hidden_states[-1][:, -1, :]
+            value = self.value_head(last_hidden_state).squeeze(-1)
+            values_list.append(value)
+        return torch.cat(values_list, 0)
 
 class EncoderCritic(nn.Module):
     def __init__(self, actor_tokenizer, critic_tokenizer):
@@ -214,7 +272,7 @@ def evaluate(actor, reward_model, triggers, max_steps, tokenizer):
         texts.append(text)
     return cos_sims, texts
 
-def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config):
+def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, actor_tokenizer, critic_tokenizer, config, use_kv_cache=True):
     batch_size = config['batch_size']
     max_steps = config['max_steps']
     gamma = config['gamma']
@@ -236,8 +294,16 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
 
     for t in range(max_steps):
         values = critic(current_triggers, states)
+        if use_kv_cache:
+            values = critic.forward_kv_cache(current_triggers, states)
+        else:
+            values = critic(current_triggers, states)
         values_list.append(values)
-        logits, probs = actor(current_triggers, states)
+        if use_kv_cache:
+            _, probs = actor.forward_kv_cache(current_triggers, states)
+        else:
+            _, probs = actor(current_triggers, states)
+        # print(f"Step {t}, logits diff: {torch.sum((logits - debug_logits) ** 2)}, probs diff: {torch.sum((probs - debug_probs) ** 2)}")
         m = Categorical(probs)
         actions = m.sample()
         log_probs = m.log_prob(actions)
@@ -250,6 +316,15 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         cos_sims, cross_cos_sims = reward_model(current_triggers, texts)
         cos_sims_list.append(cos_sims)
         cross_cos_sims_list.append(cross_cos_sims)
+    # Collect terminal values
+    if use_kv_cache:
+        final_values = critic.forward_kv_cache(current_triggers, states)
+        # Reset KV cache
+        actor.kv_cache = None
+        critic.kv_cache = None
+    else:
+        final_values = critic(current_triggers, states)
+    values_list.append(final_values)  # Now values_list has length max_steps + 1
 
     # Compute rewards
     rewards_list = []
@@ -272,11 +347,6 @@ def collect_trajectories(triggers, actor, critic, reward_model, actor_tokenizer,
         actual_naturalness_list = naturalness_scores
         naturalness_scores = torch.clamp(naturalness_scores, max=naturalness_threshold) * naturalness_coef
         rewards_list[-1] += naturalness_scores
-
-    # Collect terminal values
-    with torch.no_grad():
-        final_values = critic(current_triggers, states)
-    values_list.append(final_values)  # Now values_list has length max_steps + 1
 
     # Convert lists to tensors
     rewards_tensor = torch.stack(rewards_list)  # Shape: (max_steps, batch_size)
@@ -336,7 +406,8 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, c
             # print(f'{epoch}, difference {torch.sum(new_log_probs - flatten_old_log_probs)}', flush=True)
             surr1 = ratio * flatten_advantages
             surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * flatten_advantages
-            actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=config['entropy_threshold'])).mean()
+            # actor_loss = (-torch.min(surr1, surr2) - entropy_coef * torch.clamp(entropy, max=config['entropy_threshold'])).mean()
+            actor_loss = (-torch.min(surr1, surr2)).mean()
 
             actor_optimizer.zero_grad()
             actor_loss.backward()
@@ -363,10 +434,9 @@ def ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, c
 def train(config):
     # Initialize tokenizers and models
     actor_tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
-    critic_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    critic_tokenizer = None
     actor_tokenizer.padding_side = 'left'
     actor_tokenizer.pad_token = actor_tokenizer.eos_token
-    critic_tokenizer.pad_token = critic_tokenizer.cls_token
 
     # Load triggers
     with open('keywords.json') as f:
@@ -389,20 +459,28 @@ def train(config):
 
     # Optimizer
     actor_optimizer = optim.Adam(actor.parameters(), lr=config['learning_rate'] * 10)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'])
-    scheduler = optim.lr_scheduler.StepLR(critic_optimizer, 1, gamma=0.1)
+    critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'] * 10)
+    # actor_scheduler = optim.lr_scheduler.LinearLR(actor_optimizer, start_factor=10, end_factor=1, total_iters=100)
+    # critic_scheduler = optim.lr_scheduler.LinearLR(critic_optimizer, start_factor=10, end_factor=1, total_iters=100)
 
     # Training loop
     for episode in range(config['num_episodes']):
+        start_time = time.time()
         with torch.no_grad():
             data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config)
-        critic_only = False
-        # if episode < 0:
-        #     critic_only = True
-        # if episode == 0:
-        #     scheduler.step()
-        ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only)
+        collect_time = time.time() - start_time
 
+        start_time = time.time()
+        with torch.no_grad():
+            data = collect_trajectories(train_triggers, actor, critic, reward_model, actor_tokenizer, critic_tokenizer, config, use_kv_cache=False)
+        no_cache_collect_time = time.time() - start_time
+
+        start_time = time.time()
+        critic_only = False
+        ppo_update(actor, critic, actor_optimizer, critic_optimizer, data, config, critic_only)
+        update_time = time.time() - start_time
+
+        start_time = time.time()
         # Logging
         log_data = {
             'episode': episode + 1,
@@ -440,10 +518,12 @@ def train(config):
             })
             torch.save(actor, f"actor.pth")
             torch.save(critic, f"critic.pth")
+        logging_time = time.time() - start_time
+        print('Collect time:', collect_time, 'No Cache Collect time:', no_cache_collect_time, 'Update time:', update_time, 'Logging time:', logging_time)
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 32,
+        'batch_size': 8,
         'num_episodes': 10000,
         'gamma': 0.99,
         'gae_lambda': 0.95,  # Added GAE lambda parameter
@@ -453,15 +533,15 @@ if __name__ == '__main__':
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.05,
-        'use_naturalness': True,
+        'use_naturalness': False,
         'num_epochs': 4,
         'minibatch_size': 32,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
         'entropy_threshold': 2,
         'entropy_coef': 0.025,  # NEW: Entropy coefficient
         'eval_interval': 40,
-        'model_name': 'Qwen/Qwen2.5-0.5B'
-        # 'model_name': 'Qwen/Qwen2.5-3B-Instruct'
+        # 'model_name': 'Qwen/Qwen2.5-0.5B'
+        'model_name': 'Qwen/Qwen2.5-3B-Instruct'
         # 'model_name': 'meta-llama/Llama-3.2-3B-Instruct'
     }
     wandb.init(project='ppo_attack', config=config)
