@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J ppo_attack                         # Job name
-#SBATCH -o ./logs/ppo_attack_%j.out                  # output file (%j expands to jobID)
-#SBATCH -e ./logs/ppo_attack_%j.err                  # error log file (%j expands to jobID)
+#SBATCH -J adv_dec_main                         # Job name
+#SBATCH -o ./logs/adv_dec_main_%j.out                  # output file (%j expands to jobID)
+#SBATCH -e ./logs/adv_dec_main_%j.err                  # error log file (%j expands to jobID)
 #SBATCH --mail-type=ALL                      # Request status by email 
 #SBATCH --mail-user=rz454@cornell.edu        # Email address to send results to.
 #SBATCH -N 1                                 # Total number of nodes requested
@@ -11,4 +11,4 @@
 #SBATCH --partition=shmatikov                # Request partition
 #SBATCH --gres=gpu:a40:2                  # Type/number of GPUs needed
 #SBATCH -t 2400:00:00
-python rl_train.py
+python main.py

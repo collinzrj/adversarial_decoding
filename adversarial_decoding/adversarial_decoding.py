@@ -22,9 +22,9 @@ class AdversarialDecoding:
         # model_name = "meta-llama/Meta-Llama-3.1-70B"
         self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-        self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-        self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/linear_naturalness_model')
-        self.naturalness_eval.eval()
+        # self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        # self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/linear_naturalness_model')
+        # self.naturalness_eval.eval()
         self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
         self.encoder: BertModel = AutoModel.from_pretrained('facebook/contriever').to(device)
         # self.causal_llm_tokenizer = AutoTokenizer.from_pretrained('gpt2')
@@ -42,7 +42,7 @@ class AdversarialDecoding:
         doc_embs = self.mean_pooling(self.encoder(**doc_inputs)[0], doc_inputs['attention_mask'])
         return doc_embs
     def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
-        if False:
+        if True:
             results = []
             for i in range(0, len(texts), 100):
                 naturalness_list = self.compute_naturalness_small_batch(texts[i:i+100])

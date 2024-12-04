@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
+from transformers.cache_utils import DynamicCache
 from datasets import load_dataset
 import random
 from tqdm import tqdm
@@ -12,6 +13,8 @@ import copy   # Import copy to create a deepcopy of the actor model
 import pandas as pd
 from nltk.translate.bleu_score import sentence_bleu
 from peft import LoraConfig, get_peft_model
+import os
+import glob
 
 # Set device
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -140,34 +143,69 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, gpt2_tok
     return tokens_batch, attention_mask
 
 class Actor(nn.Module):
-    def __init__(self, gpt2_tokenizer, model_name, USE_LORA=True):
+    def __init__(self, tokenizer, model_name, use_lora=True):
         super(Actor, self).__init__()
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.get_default_dtype())
+        self.temperature = 1.0
+        self.chunk_size = 32
+        self.tokenizer = tokenizer
 
-        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
-        self.temperature = 1
-        self.gpt2_tokenizer = gpt2_tokenizer
-
-        if USE_LORA:
-            self.lora_config = LoraConfig(
-                r=16,  # Rank of the LoRA matrices
+        if use_lora:
+            lora_config = LoraConfig(
+                r=16,
                 lora_alpha=32,
-                # target_modules=["q_proj", "v_proj"],  # Modules to apply LoRA to
-                # lora_dropout=0.05,
                 bias="none",
                 task_type="CAUSAL_LM"
             )
+            self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
+        self.kv_cache = None
 
-            # Wrap the model with PEFT's LoRA model
-            self.llm = get_peft_model(self.llm, self.lora_config)
-    def forward(self, triggers, states, tokens_batch=None, attention_mask=None):
-        if tokens_batch is None or attention_mask is None:
-            tokens_batch, attention_mask = process_triggers_states(triggers, states, self.gpt2_tokenizer)
-        outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
-        # Get the logits for the last token in each sequence
-        logits = outputs.logits[:, -1, :]  # Shape: [batch_size, vocab_size]
-        # Convert logits to probabilities
-        probs = nn.functional.softmax(logits / self.temperature, dim=-1)  # Shape: [batch_size, vocab_size]
-        return logits, probs
+    def forward(self, triggers, states, all_logits=False, use_kv_cache=True):
+        logits_list = []
+        probs_list = []
+        for i in range(0, len(triggers), self.chunk_size):
+            chunk_triggers = triggers[i:i+self.chunk_size]
+            chunk_states = states[i:i+self.chunk_size]
+            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
+            outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
+            if all_logits:
+                logits = outputs.logits[:, -1-len(states[0]):-1, :]
+                probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+            else:
+                logits = outputs.logits[:, -1, :]
+                probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+            logits_list.append(logits)
+            probs_list.append(probs)
+        return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
+
+    def forward_kv_cache(self, triggers, states):
+        logits_list = []
+        probs_list = []
+        for i in range(0, len(triggers), self.chunk_size):
+            chunk_triggers = triggers[i:i+self.chunk_size]
+            chunk_states = states[i:i+self.chunk_size]
+            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
+            if self.kv_cache is None:
+                # Initialize the KV cache with the full sequence
+                outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask, use_cache=True, past_key_values=DynamicCache())
+                self.kv_cache = outputs.past_key_values
+            else:
+                # Extract the new token (assuming it's the last token in the sequence)
+                new_token = tokens_batch[:, -1].unsqueeze(-1)
+                outputs = self.llm(
+                    input_ids=new_token,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=self.kv_cache
+                )
+                # Update the KV cache with the new entries (old cache plus new)
+                self.kv_cache = outputs.past_key_values
+            # Compute logits and probabilities for the new token
+            logits = outputs.logits[:, -1, :]
+            probs = nn.functional.softmax(logits / self.temperature, dim=-1)
+            logits_list.append(logits)
+            probs_list.append(probs)
+        return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
 
 
 class EmbeddingActor(nn.Module):
@@ -244,11 +282,21 @@ class RewardModel(nn.Module):
         ds = load_dataset("microsoft/ms_marco", "v1.1")
         queries = ds['train']['query']
         random_queries = random.sample(queries, 128)
-        self.encoder = SentenceTransformer("facebook/contriever", device='cuda')
+        self.encoder = SentenceTransformer("facebook/contriever", device=device, model_kwargs={'torch_dtype': torch.get_default_dtype()})
         self.trigger_dict = {}
-        for trigger in tqdm(triggers):
-            target_queries = [trigger + query for query in random_queries]
-            self.trigger_dict[trigger] = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True).mean(dim=0)
+        path_name = 'trigger_dict.pt'
+        import pickle
+        if not os.path.exists(path_name):
+            for trigger in tqdm(triggers, desc="Building trigger embeddings"):
+                target_queries = [trigger + query for query in random_queries]
+                embeddings = self.encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True)
+                self.trigger_dict[trigger] = embeddings.mean(dim=0)
+            with open(path_name, 'wb') as f:
+                pickle.dump(self.trigger_dict, f)
+        with open(path_name, 'rb') as f:
+            self.trigger_dict = pickle.load(f)
+            for k in self.trigger_dict:
+                self.trigger_dict[k] = self.trigger_dict[k].to(torch.get_default_dtype())
             
     def forward(self, triggers, sentences):
         assert(len(triggers) == len(sentences))
@@ -325,9 +373,9 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
     reward_model = RewardModel(triggers + test_triggers).to(device)
     # Initialize models
-    if False:
-        actor = torch.load('/share/shmatikov/collin/adversarial_decoding/models/rl_actor.pth').to(device)
-        critic = torch.load('/share/shmatikov/collin/adversarial_decoding/models/rl_critic.pth').to(device)
+    if True:
+        actor: Actor = torch.load('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic_actor_160.pth').to(device)
+        critic: EncoderCritic = torch.load('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic_critic_160.pth').to(device)
     else:
         actor = Actor(actor_tokenizer, model_name).to(device)
         critic = EncoderCritic(actor_tokenizer, contriever_tokenizer).to(device)
@@ -351,6 +399,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
     # wandb.watch(actor, log='all', log_freq=100)
     # wandb.watch(critic, log='all', log_freq=100)
 
+    best_test_cos_sim = 0
     log_list = []
     for episode in range(num_episodes):
         # Initialize states with empty tokens
@@ -364,7 +413,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
         for t in tqdm(range(max_steps)):
             # Actor predicts next token logits and probabilities
-            logits, probs = actor(current_triggers, states)  # Shape: [batch_size, vocab_size]
+            logits, probs = actor.forward_kv_cache(current_triggers, states)  # Shape: [batch_size, vocab_size]
 
             if USE_KL:
                 # Reference LLM predicts next token logits
@@ -408,6 +457,8 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
             cos_sims, cross_cos_sims = reward_model(current_triggers, texts)  # Shape: [batch_size]
             cos_sims_list.append(cos_sims)
             cross_cos_sims_list.append(cross_cos_sims)
+
+        actor.kv_cache = None
             
         # Stack lists to create tensors of shape [num_steps, batch_size]
         log_probs_tensor = torch.stack(log_probs_list)  # Shape: [num_steps, batch_size]
@@ -531,7 +582,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         print(f"Episode {episode}, GPU Memory Allocated: {torch.cuda.memory_allocated() / 1e6} MB")
 
         # Evaluate model periodically
-        if (episode + 1) % (accumulation_steps * 20) == 0:
+        if (episode) % (accumulation_steps * 20) == 0:
         # if True:
             test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
             cos_sims, texts = eval(actor, reward_model, test_triggers, max_steps, actor_tokenizer)
@@ -541,11 +592,21 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 'mean_test_cos_sim': cos_sims.mean(),
                 'test_sample_texts': test_sample_table
             })
-            
-            torch.save(actor.cpu(), '/share/shmatikov/collin/adversarial_decoding/models/rl_actor.pth')
-            torch.save(critic.cpu(), '/share/shmatikov/collin/adversarial_decoding/models/rl_critic.pth')
-            actor.cuda()
-            critic.cuda()
+
+            if cos_sims.mean() > best_test_cos_sim:
+                best_test_cos_sim = cos_sims.mean()
+                torch.save(actor.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/rl_actor.pth')
+                torch.save(critic.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/rl_critic.pth')
+                with open('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/episode_info.json', 'w') as f:
+                    info = {
+                        'episode': episode,
+                        'test_cos_sim': cos_sims.mean().item(),
+                        'triggers': test_triggers,
+                        'texts': texts
+                    }
+                    json.dump(info, f, indent=2)
+                actor.cuda()
+                critic.cuda()
 
 
 if __name__ == '__main__':

@@ -43,9 +43,10 @@ plain_queries = random.sample(ds['train']['query'], total) # type: ignore
 def measure_trigger_asr():
     with open("../data/rl_trigger_results.json", 'r') as f:
         opt_trig_res = json.load(f)
-    opt_trig_ranks = {}
+    with open("../data/rl_trigger_ranks.json", 'r') as f:
+        opt_trig_ranks = json.load(f)
         
-    for opt in opt_trig_res:
+    for opt in ['RL']:
         opt_trig_ranks.setdefault(opt, {})
         for trig in opt_trig_res[opt]:
             print("Opt", opt, "Trig", trig)

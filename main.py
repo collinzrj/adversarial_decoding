@@ -5,9 +5,10 @@ from adversarial_decoding.experiment import trigger_experiment
 
 # train()
 # run()
-trigger_experiment()
+# trigger_experiment()
 
 if __name__ == '__main__':
     # optimizer = NaturalCOLDSimple()
     # optimizer.optimize()
-    train()
+    # train()
+    trigger_experiment()

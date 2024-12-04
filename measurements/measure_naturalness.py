@@ -49,11 +49,10 @@ prompts = [
 ]
 
 def measure_adv_text_naturalness():
-    with open("../data/optimizer_trigger_results.json", 'r') as f:
+    with open("../data/rl_trigger_results.json", 'r') as f:
         opt_trig_res = json.load(f)
-    with open('../data/opt_trig_naturalness.json', 'r') as f:
-        opt_trig_naturalness = json.load(f)
-    for opt in ['LlamaPerplexityLLMOptimizer']:
+    opt_trig_naturalness = {}
+    for opt in opt_trig_res:
         opt_trig_naturalness[opt] = {}
         for trig in opt_trig_res[opt]:
             adv_text = opt_trig_res[opt][trig]

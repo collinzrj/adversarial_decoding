@@ -20,6 +20,14 @@ import time
 # torch.set_default_dtype(torch.bfloat16)
 device = 'cuda:0'
 
+def whiten(values, shift_mean=True):
+    # `unbiased=False` matches TF `tf.nn.moments`'s setting
+    mean, var = torch.mean(values), torch.var(values, unbiased=False)
+    whitened = (values - mean) * torch.rsqrt(var + 1e-8)
+    if not shift_mean:
+        whitened += mean
+    return whitened
+
 def process_triggers_states(triggers, tokens_batch, tokenizer):
     assert len(triggers) == len(tokens_batch)
     prefix_texts = [f"Describe {trigger}:" for trigger in triggers]
@@ -272,7 +280,7 @@ def evaluate(actor, reward_model, triggers, max_steps, tokenizer):
         texts.append(text)
     return cos_sims, texts
 
-def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, actor_tokenizer, critic_tokenizer, config, use_kv_cache=True):
+def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model: RewardModel, actor_tokenizer, critic_tokenizer, config, use_kv_cache=True):
     batch_size = config['batch_size']
     max_steps = config['max_steps']
     gamma = config['gamma']
@@ -304,7 +312,17 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
         else:
             _, probs = actor(current_triggers, states)
         m = Categorical(probs)
-        actions = m.sample()
+        if True:
+            actions = m.sample()
+        else:
+            exploit_sampled = m.sample()
+            explore_sampled = []
+            for prob in probs:
+                _, indices = prob.topk(k=10)
+                explore_sampled.append(random.choice(indices))
+            explore_sampled = torch.tensor(explore_sampled).to(device)
+            actions = torch.where(torch.rand(batch_size).to(device) < 0.8, explore_sampled, exploit_sampled)
+        # randomly select one from top 5 from each probs
         log_probs = m.log_prob(actions)
         log_probs_list.append(log_probs)
         actions_list.append(actions)
@@ -335,7 +353,7 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
     rewards_list = []
     for t in range(max_steps):
         if t == 0:
-            prev_cos_sim = torch.zeros_like(cos_sims_list[0])
+            prev_cos_sim = reward_model.get_max_cos_sim(current_triggers)
         else:
             prev_cos_sim = cos_sims_list[t-1]
         incremental_reward = cos_sims_list[t] - prev_cos_sim
@@ -356,6 +374,7 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
     start_time = time.time()
     # Convert lists to tensors
     rewards_tensor = torch.stack(rewards_list)  # Shape: (max_steps, batch_size)
+    rewards_tensor = whiten(rewards_tensor, shift_mean=False)
     values_tensor = torch.stack(values_list)    # Shape: (max_steps + 1, batch_size)
 
     # Compute GAE
@@ -379,6 +398,7 @@ def collect_trajectories(triggers, actor: Actor, critic: Critic, reward_model, a
         'log_probs': torch.stack(log_probs_list).t(), # Shape: (batch_size, max_steps)
         'returns': returns.t(), # Shape: (batch_size, max_steps)
         'advantages': advantages.t(), # Shape: (batch_size, max_steps)
+        'rewards': rewards_tensor.t(), # Shape: (batch_size, max_steps)
         'triggers': current_triggers, # Shape: (batch_size)
         'cos_sims': cos_sims_list[-1], # Shape: (batch_size)
         'cross_cos_sims': cross_cos_sims[-1], # Shape: (batch_size)
@@ -468,8 +488,8 @@ def train(config):
     # Optimizer
     actor_optimizer = optim.Adam(actor.parameters(), lr=config['learning_rate'] * 10)
     critic_optimizer = optim.Adam(critic.parameters(), lr=config['learning_rate'] * 10)
-    # actor_scheduler = optim.lr_scheduler.LinearLR(actor_optimizer, start_factor=10, end_factor=1, total_iters=100)
-    # critic_scheduler = optim.lr_scheduler.LinearLR(critic_optimizer, start_factor=10, end_factor=1, total_iters=100)
+    actor_scheduler = optim.lr_scheduler.LinearLR(actor_optimizer, start_factor=1, end_factor=0.1, total_iters=40)
+    critic_scheduler = optim.lr_scheduler.LinearLR(critic_optimizer, start_factor=1, end_factor=0.1, total_iters=40)
 
     # Training loop
     for episode in range(config['num_episodes']):
@@ -489,6 +509,7 @@ def train(config):
             'episode': episode + 1,
             'critic_loss': data['critic_loss'].item(),
             'mean_train_cos_sim': data['cos_sims'].mean().item(),
+            'mean_train_reward': data['rewards'].sum(dim=-1).mean().item(),
             'mean_cross_cos_sims': data['cross_cos_sims'].mean().item(),
             'max_possible_cos_sim': data['max_cos_sim'].mean().item(),
             'train_generated_texts': wandb.Table(columns=['Episode', 'Trigger', 'Cosine Similarity', 'Generated Text'],
@@ -523,6 +544,8 @@ def train(config):
             torch.save(critic, f"critic.pth")
         logging_time = time.time() - start_time
         print('Collect time:', collect_time, 'Update time:', update_time, 'Logging time:', logging_time)
+        # actor_scheduler.step()
+        # critic_scheduler.step()
 
 if __name__ == '__main__':
     config = {
@@ -536,15 +559,15 @@ if __name__ == '__main__':
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 1.2,
         'naturalness_threshold': 0.05,
-        'use_naturalness': True,
+        'use_naturalness': False,
         'num_epochs': 4,
-        'minibatch_size': 8,
+        'minibatch_size': 32,
         'ppo_clip': 0.2,  # Adjusted epsilon value to 0.2 (common in PPO)
         'entropy_threshold': 2,
         'entropy_coef': 0.025,  # NEW: Entropy coefficient
         'eval_interval': 40,
-        # 'model_name': 'Qwen/Qwen2.5-0.5B'
-        'model_name': 'Qwen/Qwen2.5-3B-Instruct'
+        'model_name': 'Qwen/Qwen2.5-0.5B'
+        # 'model_name': 'Qwen/Qwen2.5-3B-Instruct'
         # 'model_name': 'meta-llama/Llama-3.2-3B-Instruct'
     }
     wandb.init(project='ppo_attack', config=config)
