@@ -1,4 +1,4 @@
-import torch, json
+import torch, json, vec2text
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
@@ -20,6 +20,7 @@ import glob
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # torch.set_default_device(device)
 device = 'cuda:0'
+trigger_dict_path = 'gtr_trigger_dict.pt'
 
 def compute_repetition_score(tokens, n=1):
     ngram_set = set()
@@ -42,21 +43,16 @@ def compute_batch_repetition_score(batch_tokens, n=2):
     return torch.tensor(batch_rep_scores).t()
 
 
-def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
+def compute_naturalness(self, texts, naturalness_llm, naturalness_llm_tokenizer, yes_token=9642, no_token=2822):
     results = []
     chunk_size = 1
     for i in range(0, len(texts), chunk_size):
-        naturalness_list = self.compute_naturalness_small_batch(texts[i:i+chunk_size])
+        naturalness_list = self.compute_naturalness_small_batch(texts[i:i+chunk_size], naturalness_llm, naturalness_llm_tokenizer, yes_token, no_token)
         results.append(naturalness_list)
     return torch.cat(results)
 
-model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-# model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int8"
-# model_name = "meta-llama/Meta-Llama-3.1-70B"
-naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
-naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
 
-def compute_naturalness_small_batch(texts, yes_token=9642, no_token=2822):
+def compute_naturalness_small_batch(texts, naturalness_llm, naturalness_llm_tokenizer, yes_token=9642, no_token=2822):
     tokens_list = []
     for text in texts:
         # query = f"""Is this text intelligible? "{text}". Just answer Yes or No."""
@@ -143,31 +139,32 @@ def process_triggers_states_different_tokenizer(triggers, tokens_batch, gpt2_tok
     return tokens_batch, attention_mask
 
 class Actor(nn.Module):
-    def __init__(self, tokenizer, model_name, use_lora=True):
+    def __init__(self):
         super(Actor, self).__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.get_default_dtype())
-        self.temperature = 1.0
+        self.llm: vec2text.models.InversionModel = vec2text.models.InversionModel.from_pretrained("jxm/gtr__nq__32")
+        self.tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/gtr-t5-base")
+        self.tokenizer.padding_side = 'left'
+        path_name = trigger_dict_path
         self.chunk_size = 32
-        self.tokenizer = tokenizer
-
-        if use_lora:
-            lora_config = LoraConfig(
-                r=16,
-                lora_alpha=32,
-                bias="none",
-                task_type="CAUSAL_LM"
-            )
-            self.llm = get_peft_model(self.llm, lora_config, autocast_adapter_dtype=False)
-        self.kv_cache = None
+        self.temperature = 1
+        with open('actor_' + path_name, 'rb') as f:
+            import pickle
+            self.trigger_dict = pickle.load(f)
+            for k in self.trigger_dict:
+                self.trigger_dict[k] = self.trigger_dict[k].to(torch.get_default_dtype())
 
     def forward(self, triggers, states, all_logits=False, use_kv_cache=True):
         logits_list = []
         probs_list = []
+        target_embs = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
+        states = [[self.tokenizer.pad_token_id] + state for state in states]
+        states = torch.tensor(states).to(device)
         for i in range(0, len(triggers), self.chunk_size):
-            chunk_triggers = triggers[i:i+self.chunk_size]
             chunk_states = states[i:i+self.chunk_size]
-            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
-            outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
+            chunk_target_embs = target_embs[i:i+self.chunk_size]
+            if chunk_states.size(1) == 0:
+                chunk_states = None
+            outputs = self.llm.forward(None, None, frozen_embeddings=chunk_target_embs, decoder_input_ids=chunk_states)
             if all_logits:
                 logits = outputs.logits[:, -1-len(states[0]):-1, :]
                 probs = nn.functional.softmax(logits / self.temperature, dim=-1)
@@ -178,95 +175,18 @@ class Actor(nn.Module):
             probs_list.append(probs)
         return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
 
-    def forward_kv_cache(self, triggers, states):
-        logits_list = []
-        probs_list = []
-        for i in range(0, len(triggers), self.chunk_size):
-            chunk_triggers = triggers[i:i+self.chunk_size]
-            chunk_states = states[i:i+self.chunk_size]
-            tokens_batch, attention_mask = process_triggers_states(chunk_triggers, chunk_states, self.tokenizer)
-            if self.kv_cache is None:
-                # Initialize the KV cache with the full sequence
-                outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask, use_cache=True, past_key_values=DynamicCache())
-                self.kv_cache = outputs.past_key_values
-            else:
-                # Extract the new token (assuming it's the last token in the sequence)
-                new_token = tokens_batch[:, -1].unsqueeze(-1)
-                outputs = self.llm(
-                    input_ids=new_token,
-                    attention_mask=attention_mask,
-                    use_cache=True,
-                    past_key_values=self.kv_cache
-                )
-                # Update the KV cache with the new entries (old cache plus new)
-                self.kv_cache = outputs.past_key_values
-            # Compute logits and probabilities for the new token
-            logits = outputs.logits[:, -1, :]
-            probs = nn.functional.softmax(logits / self.temperature, dim=-1)
-            logits_list.append(logits)
-            probs_list.append(probs)
-        return torch.cat(logits_list, 0), torch.cat(probs_list, 0)
-
-
-class EmbeddingActor(nn.Module):
-    def __init__(self, actor_tokenizer, model_name, trigger_dict):
-        super(EmbeddingActor, self).__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
-        self.temperature = 2
-        self.actor_tokenizer = actor_tokenizer
-        self.llm_word_embs = self.llm.get_input_embeddings().weight.detach()
-        self.token_emb_len = self.llm_word_embs.shape[1]
-        self.prefix_token_num = 16
-        self.mlp = torch.nn.Linear(768, self.token_emb_len * self.prefix_token_num)
-        self.trigger_dict = trigger_dict
-
-    def process_emb_states(self, triggers, states):
-        trig_embeddings = torch.stack([self.trigger_dict[trigger] for trigger in triggers])
-        prefix_token_embs = self.mlp(trig_embeddings).reshape((len(trig_embeddings), self.prefix_token_num, self.token_emb_len))
-        states_token_embs = self.llm_word_embs[torch.tensor(states).int()].to(device)
-        token_embs = torch.cat([prefix_token_embs, states_token_embs], dim=1)
-        return token_embs
-
-    def forward(self, triggers, states):
-        token_embs = self.process_emb_states(triggers, states)
-        outputs = self.llm(inputs_embeds=token_embs)
-        # Get the logits for the last token in each sequence
-        logits = outputs.logits[:, -1, :]  # Shape: [batch_size, vocab_size]
-        # Convert logits to probabilities
-        probs = nn.functional.softmax(logits / self.temperature, dim=-1)  # Shape: [batch_size, vocab_size]
-        return logits, probs
-
-
-# class Critic(nn.Module):
-#     def __init__(self, model_name, gpt2_tokenizer):
-#         super(Critic, self).__init__()
-#         self.llm = AutoModelForCausalLM.from_pretrained(model_name, output_hidden_states=True)
-#         # Value head to predict scalar value from hidden states
-#         self.value_head = nn.Linear(self.llm.config.hidden_size, 1)
-#         self.gpt2_tokenizer = gpt2_tokenizer
-        
-#     def forward(self, triggers, states):
-#         tokens_batch, attention_mask = process_triggers_states(triggers, states, self.gpt2_tokenizer)
-#         outputs = self.llm(input_ids=tokens_batch, attention_mask=attention_mask)
-#         # Get hidden states from the last layer
-#         hidden_states = outputs.hidden_states[-1]  # Shape: [batch_size, seq_len, hidden_size]
-#         # Use the hidden state corresponding to the last token
-#         last_hidden_state = hidden_states[:, -1, :]  # Shape: [batch_size, hidden_size]
-#         # Compute the scalar value
-#         value = self.value_head(last_hidden_state).squeeze(-1)  # Shape: [batch_size]
-#         return value
-
 class EncoderCritic(nn.Module):
-    def __init__(self, gpt2_tokenizer, contriever_tokenizer):
+    def __init__(self, actor_tokenizer):
         super(EncoderCritic, self).__init__()
-        self.encoder = AutoModel.from_pretrained("facebook/contriever", output_hidden_states=True)
+        model_name = "sentence-transformers/gtr-t5-base"
+        self.encoder = AutoModel.from_pretrained(model_name, output_hidden_states=True).encoder
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         # Value head to predict scalar value from hidden states
         self.value_head = nn.Linear(self.encoder.config.hidden_size, 1)
-        self.gpt2_tokenizer = gpt2_tokenizer
-        self.contriever_tokenizer = contriever_tokenizer
+        self.actor_tokenizer = actor_tokenizer
         
     def forward(self, triggers, states):
-        tokens_batch, attention_mask = process_triggers_states_different_tokenizer(triggers, states, self.gpt2_tokenizer, self.contriever_tokenizer)
+        tokens_batch, attention_mask = process_triggers_states_different_tokenizer(triggers, states, self.actor_tokenizer, self.tokenizer)
         outputs = self.encoder(input_ids=tokens_batch, attention_mask=attention_mask)
         # Get hidden states from the last layer
         last_layer_hidden_states = outputs.hidden_states[-1]  # Shape: [batch_size, seq_len, hidden_size]
@@ -282,10 +202,23 @@ class RewardModel(nn.Module):
         ds = load_dataset("microsoft/ms_marco", "v1.1")
         queries = ds['train']['query']
         random_queries = random.sample(queries, 128)
-        self.encoder = SentenceTransformer("facebook/contriever", device=device, model_kwargs={'torch_dtype': torch.get_default_dtype()})
+        self.encoder = SentenceTransformer("sentence-transformers/gtr-t5-base", device=device, model_kwargs={'torch_dtype': torch.get_default_dtype()})
         self.trigger_dict = {}
-        path_name = 'trigger_dict.pt'
+        path_name = trigger_dict_path
         import pickle
+
+        if not os.path.exists('actor_' + path_name):
+            inversion_model = vec2text.models.InversionModel.from_pretrained("jxm/gtr__nq__32").to(device)
+            tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/gtr-t5-base")
+            for trigger in tqdm(triggers, desc="Building trigger embeddings"):
+                target_queries = [trigger + query for query in random_queries]
+                inputs = tokenizer.batch_encode_plus(target_queries, return_tensors="pt", padding=True, truncation=True).to(device)
+                embeddings = inversion_model.call_embedding_model(**inputs)
+                self.trigger_dict[trigger] = embeddings.mean(dim=0)
+            del inversion_model
+            with open(path_name, 'wb') as f:
+                pickle.dump(self.trigger_dict, f)
+
         if not os.path.exists(path_name):
             for trigger in tqdm(triggers, desc="Building trigger embeddings"):
                 target_queries = [trigger + query for query in random_queries]
@@ -348,20 +281,13 @@ def eval(actor, reward_model, triggers, max_steps, gpt2_tokenizer):
     return cos_sims, texts
 
 USE_KL = False
-USE_Naturalness = True
 USE_Cross_BLEU = False
-def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl_coef, kl_threshold, max_steps, cross_cos_sim_threshold, naturalness_threshold, naturalness_coef, cross_cos_sim_coef):
+def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl_coef, kl_threshold, max_steps, cross_cos_sim_threshold, naturalness_threshold, naturalness_coef, cross_cos_sim_coef, use_naturalness):
+    if use_naturalness:
+        model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
     # Initialize Weights & Biases
-
-    # Initialize the tokenizer and set the pad token
-    # model_name = "Qwen/Qwen2-0.5B-Instruct"
-    model_name = "meta-llama/Llama-3.1-8B"
-    actor_tokenizer = AutoTokenizer.from_pretrained(model_name)
-    contriever_tokenizer = AutoTokenizer.from_pretrained('google-bert/bert-base-uncased')
-    actor_tokenizer.padding_side = 'left'
-    actor_tokenizer.pad_token = actor_tokenizer.eos_token  # Set pad token
-    contriever_tokenizer.pad_token = contriever_tokenizer.cls_token
-    print(contriever_tokenizer.pad_token)
 
     with open('keywords.json') as f:
         triggers = json.load(f)
@@ -370,19 +296,19 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
     random.shuffle(triggers)
     test_triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles', 'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post', 'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
     triggers = list(set(triggers) - set(test_triggers))
-
     reward_model = RewardModel(triggers + test_triggers).to(device)
+
     # Initialize models
-    if True:
+    if False:
         actor: Actor = torch.load('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic_actor_160.pth').to(device)
         critic: EncoderCritic = torch.load('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic_critic_160.pth').to(device)
     else:
-        actor = Actor(actor_tokenizer, model_name).to(device)
-        critic = EncoderCritic(actor_tokenizer, contriever_tokenizer).to(device)
+        actor = Actor().to(device)
+        critic = EncoderCritic(actor.tokenizer).to(device)
 
     # Initialize the reference actor (reference LLM)
     if USE_KL:
-        reference_actor = Actor(actor_tokenizer, model_name).to(device)
+        reference_actor = Actor().to(device)
         reference_actor.eval()
         for param in reference_actor.parameters():
             param.requires_grad = False
@@ -413,7 +339,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
         for t in tqdm(range(max_steps)):
             # Actor predicts next token logits and probabilities
-            logits, probs = actor.forward_kv_cache(current_triggers, states)  # Shape: [batch_size, vocab_size]
+            logits, probs = actor.forward(current_triggers, states)  # Shape: [batch_size, vocab_size]
 
             if USE_KL:
                 # Reference LLM predicts next token logits
@@ -453,11 +379,15 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 states[i].append(actions_sampled[i].item())
 
             # Get rewards from the reward model
-            texts = [actor_tokenizer.decode(s, skip_special_tokens=True) for s in states]
+            texts = [actor.tokenizer.decode(s, skip_special_tokens=True) for s in states]
             cos_sims, cross_cos_sims = reward_model(current_triggers, texts)  # Shape: [batch_size]
             cos_sims_list.append(cos_sims)
             cross_cos_sims_list.append(cross_cos_sims)
 
+
+        actor.kv_cache = None
+            
+            
         actor.kv_cache = None
             
         # Stack lists to create tensors of shape [num_steps, batch_size]
@@ -480,12 +410,12 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 rewards_list[t] = incremental_reward
         else:
             rewards_list = [rewards * (0.8 ** (len(rewards_list) - i - 1)) for i, rewards in enumerate(rewards_list)]
-        if USE_Naturalness:
-            naturalness_scores = compute_naturalness_small_batch(actor_tokenizer.batch_decode(states))
+        if use_naturalness:
+            naturalness_scores = compute_naturalness_small_batch(actor.tokenizer.batch_decode(states), naturalness_llm, naturalness_llm_tokenizer)
             for i in range(len(states)):
                 rewards_list[-1][i] += torch.clamp(naturalness_scores[i], max=naturalness_threshold) * naturalness_coef
         if USE_Cross_BLEU:
-            cross_bleu = compute_cross_bleu(actor_tokenizer.batch_decode(states))
+            cross_bleu = compute_cross_bleu(actor.tokenizer.batch_decode(states))
             for i in range(len(states)):
                 rewards_list[-1][i] -= cross_bleu[i]
 
@@ -531,7 +461,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
             'max_possible_cos_sim': max_cos_sim.mean().item(),
             'mean_cross_cos_sim': cross_cos_sims_list[-1].mean().item()
         }
-        if USE_Naturalness:
+        if use_naturalness:
             current_log_dict = current_log_dict | {
                 'mean_naturalness_score': naturalness_scores.mean().item()
             }
@@ -574,7 +504,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
             train_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
             for trigger, state, cos_sim in zip(current_triggers, states, cos_sims_list[-1]):
                 print("Trigger:", trigger, "Cos sim", cos_sim.item())
-                text = repr(actor_tokenizer.decode(state, skip_special_tokens=True))
+                text = repr(actor.tokenizer.decode(state, skip_special_tokens=True))
                 print("Sample generated text:", text)
                 train_sample_table.add_data(episode + 1, trigger, cos_sim.item(), text)
             wandb.log({'train_generated_texts': train_sample_table})
@@ -585,7 +515,7 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
         if (episode) % (accumulation_steps * 20) == 0:
         # if True:
             test_sample_table = wandb.Table(columns=['episode', 'trigger', 'cos_sim', 'generated_text'])
-            cos_sims, texts = eval(actor, reward_model, test_triggers, max_steps, actor_tokenizer)
+            cos_sims, texts = eval(actor, reward_model, test_triggers, max_steps, actor.tokenizer)
             for trigger, text, cos_sim in zip(test_triggers, texts, cos_sims):
                 test_sample_table.add_data(episode, trigger, cos_sim.item(), text)
             wandb.log({
@@ -595,9 +525,9 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
             if cos_sims.mean() > best_test_cos_sim:
                 best_test_cos_sim = cos_sims.mean()
-                torch.save(actor.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/rl_actor.pth')
-                torch.save(critic.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/rl_critic.pth')
-                with open('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/episode_info.json', 'w') as f:
+                torch.save(actor.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/vec2text/rl_actor.pth')
+                torch.save(critic.cpu(), f'/share/shmatikov/collin/adversarial_decoding/models/vec2text/rl_critic.pth')
+                with open('/share/shmatikov/collin/adversarial_decoding/models/vec2text/episode_info.json', 'w') as f:
                     info = {
                         'episode': episode,
                         'test_cos_sim': cos_sims.mean().item(),
@@ -611,18 +541,19 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
 
 if __name__ == '__main__':
     config = {
-        'batch_size': 4,  # Number of sequences to process in parallel
+        'batch_size': 32,  # Number of sequences to process in parallel
         'num_episodes': 10000,
         'gamma': 0.99,  # Discount factor
         'learning_rate': 1e-4,
-        'accumulation_steps': 2,  # Number of steps to accumulate gradients
+        'accumulation_steps': 1,  # Number of steps to accumulate gradients
         'kl_coef': 1,  # Coefficient for KL divergence loss
         'kl_threshold': 1000,
         'max_steps': 16,  # Max tokens per episode
         'cross_cos_sim_threshold': 0.35, 
         'naturalness_coef': 4,
-        'cross_cos_sim_coef': 1.2,
-        'naturalness_threshold': 0.06
+        'cross_cos_sim_coef': 0,
+        'naturalness_threshold': 0.06,
+        'use_naturalness': False
     }
-    wandb.init(project='my_rl_project', config=config)
+    wandb.init(project='vec2text_rl', config=config)
     train(**config)

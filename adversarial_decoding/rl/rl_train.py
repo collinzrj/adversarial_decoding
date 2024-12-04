@@ -50,11 +50,11 @@ def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
         results.append(naturalness_list)
     return torch.cat(results)
 
-model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-# model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int8"
-# model_name = "meta-llama/Meta-Llama-3.1-70B"
-naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
-naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
+# model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+# # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int8"
+# # model_name = "meta-llama/Meta-Llama-3.1-70B"
+# naturalness_llm_tokenizer = AutoTokenizer.from_pretrained(model_name)
+# naturalness_llm = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:1')
 
 def compute_naturalness_small_batch(texts, yes_token=9642, no_token=2822):
     tokens_list = []
@@ -609,20 +609,31 @@ def train(batch_size, num_episodes, gamma, learning_rate, accumulation_steps, kl
                 critic.cuda()
 
 
+def eval():
+    actor = torch.load('/share/shmatikov/collin/adversarial_decoding/models/nlp_topic/rl_actor.pth').to(device)
+    triggers = ['spotify']
+    states = actor_inference(actor, triggers, 16)
+    model_name = "meta-llama/Llama-3.1-8B"
+    actor_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    sents = actor_tokenizer.batch_decode(states)
+    print(sents)
+
+
 if __name__ == '__main__':
-    config = {
-        'batch_size': 4,  # Number of sequences to process in parallel
-        'num_episodes': 10000,
-        'gamma': 0.99,  # Discount factor
-        'learning_rate': 1e-4,
-        'accumulation_steps': 2,  # Number of steps to accumulate gradients
-        'kl_coef': 1,  # Coefficient for KL divergence loss
-        'kl_threshold': 1000,
-        'max_steps': 16,  # Max tokens per episode
-        'cross_cos_sim_threshold': 0.35, 
-        'naturalness_coef': 4,
-        'cross_cos_sim_coef': 1.2,
-        'naturalness_threshold': 0.06
-    }
-    wandb.init(project='my_rl_project', config=config)
-    train(**config)
+    eval()
+    # config = {
+    #     'batch_size': 4,  # Number of sequences to process in parallel
+    #     'num_episodes': 10000,
+    #     'gamma': 0.99,  # Discount factor
+    #     'learning_rate': 1e-4,
+    #     'accumulation_steps': 2,  # Number of steps to accumulate gradients
+    #     'kl_coef': 1,  # Coefficient for KL divergence loss
+    #     'kl_threshold': 1000,
+    #     'max_steps': 16,  # Max tokens per episode
+    #     'cross_cos_sim_threshold': 0.35, 
+    #     'naturalness_coef': 4,
+    #     'cross_cos_sim_coef': 1.2,
+    #     'naturalness_threshold': 0.06
+    # }
+    # wandb.init(project='my_rl_project', config=config)
+    # train(**config)
