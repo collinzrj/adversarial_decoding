@@ -12,6 +12,7 @@ from torch.nn.functional import normalize
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import List, cast
+from sentence_transformers import SentenceTransformer
 
 
 class AdversarialDecoding:    
@@ -25,8 +26,9 @@ class AdversarialDecoding:
         # self.naturalness_eval_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
         # self.naturalness_eval = BertForSequenceClassification.from_pretrained('./models/linear_naturalness_model')
         # self.naturalness_eval.eval()
-        self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
-        self.encoder: BertModel = AutoModel.from_pretrained('facebook/contriever').to(device)
+        # self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
+        # self.encoder: BertModel = AutoModel.from_pretrained('facebook/contriever').to(device)
+        self.encoder = SentenceTransformer('sentence-transformers/gtr-t5-base', device=device)
         # self.causal_llm_tokenizer = AutoTokenizer.from_pretrained('gpt2')
         # self.causal_llm = AutoModelForCausalLM.from_pretrained('gpt2').to(device)
         self.causal_llm_tokenizer = self.naturalness_llm_tokenizer
@@ -38,9 +40,11 @@ class AdversarialDecoding:
         return sentence_embeddings
 
     def compute_doc_embs(self, documents):
-        doc_inputs = self.encoder_tokenizer(documents, padding=True, truncation=True, return_tensors='pt')
-        doc_embs = self.mean_pooling(self.encoder(**doc_inputs)[0], doc_inputs['attention_mask'])
-        return doc_embs
+        # doc_inputs = self.encoder_tokenizer(documents, padding=True, truncation=True, return_tensors='pt')
+        # doc_embs = self.mean_pooling(self.encoder(**doc_inputs)[0], doc_inputs['attention_mask'])
+        # return doc_embs
+        return self.encoder.encode(documents, convert_to_tensor=True, normalize_embeddings=True)
+        
     def compute_naturalness(self, texts, yes_token=9642, no_token=2822):
         if True:
             results = []
@@ -222,7 +226,5 @@ class AdversarialDecoding:
             print(epoch, "score", candidates[0].score, 'naturalness', candidates[0].naturalness, 'trig_cos_sim', candidates[0].trig_cos_sim, flush=True)
 
         # best_sequence = candidates[0].sequence
-        result = self.encoder_tokenizer.encode(candidates[0].sequence_str)
         print('result str', candidates[0].sequence_str)
-        print(result)
         return candidates[0].sequence_str

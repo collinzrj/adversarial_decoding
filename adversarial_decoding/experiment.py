@@ -79,13 +79,13 @@ def trigger_experiment():
     triggers = ['spotify']
     # optimizers = [BeamSearchHotflip]
     triggers = ['homegoods', 'huawei', 'science channel', 'vh1', 'lidl', 'triumph motorcycles', 'avon', 'snapchat', 'steelseries keyboard', 'yeezy', 'laurent-perrier', 'the washington post', 'twitch', 'engadget', 'bruno mars', 'giorgio armani', 'old el paso', 'levis', 'kings', 'ulta beauty']
-    optimizers = [AdversarialDecoding]
+    optimizers = [BasicAdversarialDecoding]
     ds = load_dataset("microsoft/ms_marco", "v1.1")
     queries = ds['train']['query'] # type: ignore
     random_queries = random.sample(queries, 256)
     train_queries = random_queries[:128]
     test_queries = random_queries[128:]
-    file_name = './data/rl_trigger_results.json'
+    file_name = './data/gtr_trigger_results.json'
     try:
         with open(file_name, 'r') as f:
                 result = json.load(f)
@@ -94,12 +94,12 @@ def trigger_experiment():
     for optimizer_cls in optimizers:
         optimizer = optimizer_cls()
         optimizer_name = optimizer.__class__.__name__
-        result.setdefault(optimizer_name + '_50', {})
+        result.setdefault(optimizer_name, {})
         for trigger in tqdm(triggers):
             print("Optimizing", optimizer_name, trigger)
             prefix_trigger_documents = [trigger + query for query in test_queries]
-            result_str = optimizer.optimize(documents=prefix_trigger_documents, trigger=trigger, llm_beam_width=50)
-            result[optimizer_name + '_50'][trigger] = result_str
+            result_str, result_cos_sim = optimizer.optimize(documents=prefix_trigger_documents, trigger=trigger, max_length=16)
+            result[optimizer_name][trigger] = [result_str, result_cos_sim.item()]
             with open(file_name, 'w') as f:
                 json.dump(result, f, indent=2)
         del optimizer

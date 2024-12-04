@@ -74,7 +74,7 @@ class BasicAdversarialDecoding:
         device = torch.get_default_device()
         # self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
         # self.encoders = [SentenceTransformer("sentence-transformers/gtr-t5-base", device='cuda'), SentenceTransformer("facebook/contriever", device='cuda')]
-        self.encoders = [SentenceTransformer("facebook/contriever", device='cuda')]
+        self.encoders = [SentenceTransformer("sentence-transformers/gtr-t5-base", device='cuda')]
         # self.encoders = [SentenceTransformer("sentence-transformers/sentence-t5-base", device='cuda'), SentenceTransformer("facebook/contriever", device='cuda')]
         # self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct')
         # self.naturalness_llm_tokenizer.pad_token = self.naturalness_llm_tokenizer.eos_token
@@ -183,5 +183,5 @@ class BasicAdversarialDecoding:
         # result = self.encoder_tokenizer.encode(candidates[0].sequence_str)
         print('result str', candidates[0].sequence_str)
         # print(result)
-        return candidates[0].sequence_str
+        return candidates[0].sequence_str, candidates[0].trig_cos_sim
     
