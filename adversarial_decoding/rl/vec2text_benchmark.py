@@ -3,7 +3,9 @@ from transformers import AutoTokenizer, AutoModel, T5ForConditionalGeneration
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 
-inversion_model = vec2text.models.InversionModel.from_pretrained("jxm/gtr-32")
+inversion_model = vec2text.models.InversionModel.from_pretrained("jxm/gtr__nq__32")
+corrector_model = vec2text.models.CorrectorEncoderModel.from_pretrained("jxm/gtr__nq__32__correct")
+corrector = vec2text.load_corrector(inversion_model, corrector_model)
 
 tokenizer = AutoTokenizer.from_pretrained("t5-base")
 # inputs = tokenizer("hello world", return_tensors="pt")
@@ -17,19 +19,21 @@ random_queries = random.sample(queries, 128)
 trigger = 'homegoods'
 target_queries = [trigger + query for query in random_queries]
 
-embeddings = encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True).to('cpu')
-print(embeddings)
+# embeddings = encoder.encode(target_queries, convert_to_tensor=True, normalize_embeddings=True).to('cpu')
+# print(embeddings)
 
-inputs = tokenizer.batch_encode_plus(target_queries, return_tensors="pt", padding=True, truncation=True)
-embeddings = inversion_model.call_embedding_model(**inputs)
-print(embeddings)
+def get_embeddings(texts):
+    inputs = tokenizer.batch_encode_plus(texts, return_tensors="pt", padding=True, truncation=True).to('cuda')
+    embeddings = inversion_model.call_embedding_model(**inputs)
+    return embeddings
 
+embeddings = get_embeddings(target_queries)
 emb = embeddings.mean(dim=0)
 embs = emb.unsqueeze(0)
 
-logits = inversion_model.forward(None, None, frozen_embeddings=embs, decoder_input_ids=torch.tensor([[0]])).logits
-output = logits[0].argmax(dim=-1)
-print(output)
+# logits = inversion_model.forward(None, None, frozen_embeddings=embs, decoder_input_ids=torch.tensor([[0]])).logits
+# output = logits[0].argmax(dim=-1)
+# print(output)
 
 
 tokens = inversion_model.generate(
@@ -38,20 +42,23 @@ tokens = inversion_model.generate(
     },
     generation_kwargs={})
 print(tokens)
-adv = tokenizer.batch_decode(tokens)
+adv = tokenizer.batch_decode(tokens)[0]
 print(adv)
 
+adv2 = vec2text.invert_embeddings(embs, corrector, num_steps=40, sequence_beam_width=20)[0]
+print(adv2)
 
 
-doc_embeds = encoder.encode([trigger + query for query in random_queries], convert_to_tensor=True)
-adv = tokenizer.batch_decode(tokens)
 
-for adv_text in [adv,
-                 "I was listening to Spotify on my phone when a friend recommended a new playlist on Spotify, so I opened the Spotify app, searched for it on Spotify, and saved it to my Spotify library.",
-                 " Spotify is not just a playlist or a streaming\u00a0app. Spotify is the place, Spotify culture, Spotify\u00a0people, Spotify music that\u00a0gets played on Spotify",
-                 " HomeGoods is a popular chain of stores specializing in home decor, accessories, textiles"]:
-    print(adv_text)
-    adv_emb = encoder.encode(adv_text, convert_to_tensor=True)
+# doc_embeds = encoder.encode([trigger + query for query in random_queries], convert_to_tensor=True)
+doc_embeds = get_embeddings([trigger + query for query in random_queries])
+
+for adv_text in [adv, adv2,
+                 "what is homegood, what are these things that they are called when they are"]:
+    print("")
+    print([adv_text])
+    # adv_emb = encoder.encode(adv_text, convert_to_tensor=True)
+    adv_emb = get_embeddings([adv_text])
     print(torch.nn.functional.cosine_similarity(doc_embeds, adv_emb, dim=-1).mean().item())
 
 # adv_text = "I was listening to Spotify on my phone when a friend recommended a new playlist on Spotify, so I opened the Spotify app, searched for it on Spotify, and saved it to my Spotify library."

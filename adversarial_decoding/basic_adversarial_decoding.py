@@ -8,6 +8,18 @@ from tqdm import tqdm
 from dataclasses import dataclass, field
 from sentence_transformers import SentenceTransformer
 
+class MyEncoder:
+    def __init__(self):
+        import vec2text
+        self.inversion_model = vec2text.models.InversionModel.from_pretrained("jxm/gtr__nq__32").to('cuda')
+        self.tokenizer = AutoTokenizer.from_pretrained("t5-base")
+        set_no_grad(self.inversion_model)
+
+    def encode(self, texts, **kawrgs):
+        inputs = self.tokenizer.batch_encode_plus(texts, return_tensors="pt", padding=True, truncation=True).to('cuda')
+        embeddings = self.inversion_model.call_embedding_model(**inputs)
+        return embeddings
+
 def set_no_grad(model):
     model.eval()
     for param in model.parameters():
@@ -74,7 +86,8 @@ class BasicAdversarialDecoding:
         device = torch.get_default_device()
         # self.encoder_tokenizer = AutoTokenizer.from_pretrained('facebook/contriever')
         # self.encoders = [SentenceTransformer("sentence-transformers/gtr-t5-base", device='cuda'), SentenceTransformer("facebook/contriever", device='cuda')]
-        self.encoders = [SentenceTransformer("sentence-transformers/gtr-t5-base", device='cuda')]
+        # self.encoders = [SentenceTransformer("sentence-transformers/gtr-t5-base", device='cuda')]
+        self.encoders = [MyEncoder()]
         # self.encoders = [SentenceTransformer("sentence-transformers/sentence-t5-base", device='cuda'), SentenceTransformer("facebook/contriever", device='cuda')]
         # self.naturalness_llm_tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3.1-8B-Instruct')
         # self.naturalness_llm_tokenizer.pad_token = self.naturalness_llm_tokenizer.eos_token

@@ -52,11 +52,12 @@ def measure_doc_perplexities():
 def measure_adv_perplexities():
     measurer = PerplexityMeasurer()
     opt_trig_perp = {}
-    with open('../data/optimizer_trigger_results.json') as f:
+    with open('../data/rl_trigger_results.json') as f:
         res = json.load(f)
         for opt in res:
             opt_trig_perp[opt] = {}
             for trig in res[opt]:
+                print(opt, trig)
                 adv = res[opt][trig]
                 perp = measurer.compute_perplexity([adv])[0]
                 opt_trig_perp[opt][trig] = perp
@@ -76,11 +77,12 @@ if __name__ == '__main__':
     with open('../data/doc_perplexities.json', 'r') as f:
         results = json.load(f)
         data.append(np.log([p[1] for p in results]))
-    for k in ['BeamSearchHotflip', 'EnergyPerplexityOptimizer', 'PerplexityLLMOptimizer', 'NaturalnessLLMOptimizer']:
+    for k in ['BasicAdversarialDecoding', 'AdversarialDecoding', 'RL_better']:
         v = opt_trig_perp[k]
         data.append(np.log(list(v.values())))
     ax = violinplot(data=data)
-    ax.set_xticklabels(['real', 'Hotflip', 'Energy', 'Perplexity', 'Naturalness'])
+    ax.set_xticklabels(['real', 'BasicAdv', 'AdvDec', 'RL'])
     ax.set_ylabel('Perplexity (log scale)')
     plt.savefig('violin.pdf')
+    plt.savefig('violin.png')
         

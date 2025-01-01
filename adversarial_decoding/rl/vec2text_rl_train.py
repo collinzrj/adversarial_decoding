@@ -553,7 +553,7 @@ if __name__ == '__main__':
         'naturalness_coef': 4,
         'cross_cos_sim_coef': 0,
         'naturalness_threshold': 0.06,
-        'use_naturalness': False
+        'use_naturalness': True
     }
     wandb.init(project='vec2text_rl', config=config)
     train(**config)
