@@ -5,6 +5,7 @@ class TreeNode:
     def __init__(self):
         self.children = {}
         self.key_value = None  # Stores key_value for this token (n_layers, 2, num_heads, embed_size_per_head)
+        self.logits = None  # Stores logits for this token (vocab_size)
 
 class LLMKeyValueTree:
     def __init__(self):
@@ -35,9 +36,13 @@ class LLMKeyValueTree:
         else:
             return None
 
-    def store_key_values(self, tokens, key_values):
+    def store_key_values(self, tokens, key_values, tokens_logits=None):
+        # print("tokens len", len(tokens))
+        # if tokens_logits is not None:
+        #     print("tokens_logits len", len(tokens_logits))
         # print("tokens", tokens)
         # key_values shape: (sequence_length, n_layers, 2, num_heads, embed_size_per_head)
+        # tokens_logits shape: (sequence_length, vocab_size)
         node = self.root
         sequence_length = key_values.shape[0]
         assert sequence_length == len(tokens), f"Tokens length and key_values sequence length must match. But sequence_length is {sequence_length}, tokens len is {len(tokens)}"
@@ -47,6 +52,28 @@ class LLMKeyValueTree:
                 node.children[token] = TreeNode()
             node = node.children[token]
             node.key_value = key_values[i]  # Shape: (n_layers, 2, num_heads, embed_size_per_head)
+            if tokens_logits is not None:
+                pad_len = len(tokens) - len(tokens_logits)
+                if i >= pad_len:
+                    node.logits = tokens_logits[i - pad_len]
+
+    def load_logits(self, tokens):
+        node = self.root
+        logits_list = []
+        for token in tokens:
+            # print(node.children, token in node.children)
+            if token in node.children:
+                node = node.children[token]
+                if node.logits is not None:
+                    logits_list.append(node.logits)
+                else:
+                    # print("Logits missing for token", token)
+                    break
+            else:
+                # print("Token missing in tree", token)
+                break
+        logits = torch.stack(logits_list)
+        return logits
 
 
 def test_llm_key_value():
@@ -137,11 +164,11 @@ def llm_tree_accelerate_last_logit(batch_tokens, tree: LLMKeyValueTree, causal_l
         outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
         return outputs.logits[:, -1, :]
 
-def llm_tree_accelerate_logits(batch_tokens, tree: LLMKeyValueTree, causal_llm, cache_logits):
-    print(batch_tokens)
+def llm_tree_accelerate_logits(batch_tokens, tree: LLMKeyValueTree, causal_llm):
+    # print(batch_tokens)
     batch_tokens = [torch.tensor(tokens) for tokens in batch_tokens]
     assert all(len(lst) == len(batch_tokens[0]) for lst in batch_tokens), "All tokens should have the same length"
-    print(f"Tokens length {len(batch_tokens[0])}")
+    # print(f"Tokens length {len(batch_tokens[0])}")
     if True:
         min_cache_len = 100000000
         prefix_batch_kv = []
@@ -159,15 +186,18 @@ def llm_tree_accelerate_logits(batch_tokens, tree: LLMKeyValueTree, causal_llm, 
             past_kv = permute_to_nlayer_format(prefix_batch_kv)
             outputs = causal_llm(input_ids=suffix_tokens, past_key_values=past_kv, use_cache=True)
             full_batch_kv = permute_to_batch_format(outputs.past_key_values)
-            for tokens, kv in zip(batch_tokens, full_batch_kv):
-                tree.store_key_values(tokens.tolist(), kv)
+            for tokens, kv, tokens_logits in zip(batch_tokens, full_batch_kv, outputs.logits):
+                tree.store_key_values(tokens.tolist(), kv, tokens_logits)
         else:
             outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
             batch_kv = permute_to_batch_format(outputs.past_key_values)
-            for tokens, kv in zip(batch_tokens, batch_kv):
-                tree.store_key_values(tokens.tolist(), kv)
-                kv = tree.load_key_values(tokens.tolist())
-        return torch.stack([cache_logits, outputs.logits], dim=1)
+            for tokens, kv, tokens_logits in zip(batch_tokens, batch_kv, outputs.logits):
+                tree.store_key_values(tokens.tolist(), kv, tokens_logits)
+                # kv = tree.load_key_values(tokens.tolist())
+        batch_cache_logits = [tree.load_logits(tokens.tolist()) for tokens in batch_tokens]
+        for tokens, cache_logits in zip(batch_tokens, batch_cache_logits):
+            assert(len(tokens) == len(cache_logits)), f"Tokens length {len(tokens)} and cache_logits length {len(cache_logits)} must match"
+        return torch.stack(batch_cache_logits)
     else:
         outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
         return outputs.logits[:, -1, :]

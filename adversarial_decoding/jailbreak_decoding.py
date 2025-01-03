@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from typing import List, cast
 from sentence_transformers import SentenceTransformer
 from termcolor import colored
+from naturalness_eval.llm_tree import LLMKeyValueTree, llm_tree_accelerate_logits
 
 chat_prefix = [128000, 128006, 9125, 128007, 271, 38766, 1303, 33025, 2696, 25, 6790, 220, 2366, 18, 198, 15724, 2696, 25, 220, 1627, 10263, 220, 2366, 19, 271, 128009, 128006, 882, 128007, 271]
 chat_suffix = [128009, 128006, 78191, 128007, 271]
 USE_NATURALNESS = True
+llm_tree = LLMKeyValueTree()
 
 def compute_perplexity(causal_llm, tokens_batch, ignore_tokens_num=1):
     assert ignore_tokens_num >= 1
@@ -25,7 +27,11 @@ def compute_perplexity(causal_llm, tokens_batch, ignore_tokens_num=1):
     attention_mask = torch.ones_like(inputs)
     labels = inputs
     # input_ids = torch.tensor([seq]).to(device)
-    lm_logits = causal_llm(input_ids=inputs, attention_mask=attention_mask).logits
+    if False:
+        lm_logits = llm_tree_accelerate_logits(inputs, llm_tree, causal_llm)
+    else:
+        lm_logits = causal_llm(input_ids=inputs, attention_mask=attention_mask).logits
+    # print("lm_logits shape", lm_logits.shape)
     shift_logits = lm_logits[..., ignore_tokens_num-1:-1, :].contiguous()
     shift_labels = labels[..., ignore_tokens_num:].contiguous()
     shift_masks = attention_mask[..., ignore_tokens_num:].contiguous()
