@@ -79,6 +79,7 @@ class JailbreakDecoding:
         # self.causal_llm_tokenizer = AutoTokenizer.from_pretrained('gpt2')
         # self.causal_llm = AutoModelForCausalLM.from_pretrained('gpt2').to(device)
         causal_model_name = "lmsys/vicuna-7b-v1.5"
+        # causal_model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
         self.causal_llm_tokenizer = AutoTokenizer.from_pretrained(causal_model_name)
         self.causal_llm = AutoModelForCausalLM.from_pretrained(causal_model_name).to(device)
         self.chat_format = ChatFormat()
