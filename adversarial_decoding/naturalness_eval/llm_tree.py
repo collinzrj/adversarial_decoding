@@ -136,3 +136,38 @@ def llm_tree_accelerate_last_logit(batch_tokens, tree: LLMKeyValueTree, causal_l
     else:
         outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
         return outputs.logits[:, -1, :]
+
+def llm_tree_accelerate_logits(batch_tokens, tree: LLMKeyValueTree, causal_llm, cache_logits):
+    print(batch_tokens)
+    batch_tokens = [torch.tensor(tokens) for tokens in batch_tokens]
+    assert all(len(lst) == len(batch_tokens[0]) for lst in batch_tokens), "All tokens should have the same length"
+    print(f"Tokens length {len(batch_tokens[0])}")
+    if True:
+        min_cache_len = 100000000
+        prefix_batch_kv = []
+        for tokens in batch_tokens:
+            kv = tree.load_key_values(tokens.tolist())
+            if kv is None:
+                min_cache_len = 0
+                break
+            min_cache_len = min(kv.shape[0], min_cache_len)
+            prefix_batch_kv.append(kv)
+        print("min_cache_len", min_cache_len)
+        if min_cache_len > 0:
+            prefix_batch_kv = torch.stack([kv[:min_cache_len] for kv in prefix_batch_kv])
+            suffix_tokens = torch.stack([tokens[min_cache_len:] for tokens in batch_tokens])
+            past_kv = permute_to_nlayer_format(prefix_batch_kv)
+            outputs = causal_llm(input_ids=suffix_tokens, past_key_values=past_kv, use_cache=True)
+            full_batch_kv = permute_to_batch_format(outputs.past_key_values)
+            for tokens, kv in zip(batch_tokens, full_batch_kv):
+                tree.store_key_values(tokens.tolist(), kv)
+        else:
+            outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
+            batch_kv = permute_to_batch_format(outputs.past_key_values)
+            for tokens, kv in zip(batch_tokens, batch_kv):
+                tree.store_key_values(tokens.tolist(), kv)
+                kv = tree.load_key_values(tokens.tolist())
+        return torch.stack([cache_logits, outputs.logits], dim=1)
+    else:
+        outputs = causal_llm(input_ids=torch.stack(batch_tokens), use_cache=True)
+        return outputs.logits[:, -1, :]
