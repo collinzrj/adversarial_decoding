@@ -1,5 +1,5 @@
 from transformers import AutoModel, AutoTokenizer, BertModel, T5ForConditionalGeneration, AutoModelForMaskedLM, AutoModelForCausalLM, LlamaModel, BertForSequenceClassification
-import torch, time, os
+import torch, time, os, copy
 from tqdm import tqdm
 from dataclasses import dataclass, field
 import random, pickle
@@ -53,11 +53,14 @@ def compute_perplexity(causal_llm, tokens_batch, batch_kv_cache: List[DynamicCac
     # print("tokens len", len(tokens_batch[0]))
     # tokens_batch = [tokens[cache_seq_len:] for tokens in tokens_batch]
     inputs = torch.tensor(tokens_batch)
+    # print("inputs 1", inputs)
     inputs = inputs[:, cache_seq_len:]
+    # print("inputs 2", inputs)
     attention_mask = torch.ones_like(inputs)
     labels = inputs
+    print("ignore_tokens_num", ignore_tokens_num, "cache_seq_len", cache_seq_len)
     ignore_tokens_num = ignore_tokens_num - cache_seq_len
-    outputs = causal_llm(input_ids=inputs, attention_mask=torch.ones_like(torch.tensor(tokens_batch)), past_key_values=kv_cache, use_cache=True)
+    outputs = causal_llm(input_ids=inputs, attention_mask=torch.ones_like(torch.tensor(tokens_batch)), past_key_values=kv_cache, use_cache=True) 
     next_kv_cache: DynamicCache = outputs.past_key_values
     next_kv_cache.crop(next_cache_seq_len)
     # print("next_kv_cache", next_kv_cache.get_seq_length())
@@ -68,6 +71,8 @@ def compute_perplexity(causal_llm, tokens_batch, batch_kv_cache: List[DynamicCac
     shift_masks = attention_mask[..., ignore_tokens_num:].contiguous()
     # Flatten the tokens
     loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+    # print("shift_logits", shift_logits)
+    # print("shift_labels", shift_labels)
     loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
     loss = loss.view(shift_labels.shape[0], -1) * shift_masks
     loss = torch.sum(loss, -1) / torch.sum(shift_masks, -1)
@@ -265,17 +270,16 @@ class JailbreakDecoding:
                     model_start = time.time()
                     timer.start('causal_llm')
                     torch.cuda.synchronize()
-                    # if epoch > 0:
-                    #     outputs = self.causal_llm(input_ids[:, -1:], past_key_values=llm_candidate.kv_cache)
-                    # else:
-                    #     outputs = self.causal_llm(input_ids[:, -1:])
-                    outputs = self.causal_llm(input_ids[:, -1:])
+                    if epoch > 0:
+                        # this secretly updates the kv_cache
+                        outputs = self.causal_llm(input_ids[:, -1:], past_key_values=copy.deepcopy(llm_candidate.kv_cache), use_cache=True)
+                    else:
+                        outputs = self.causal_llm(input_ids)
                     next_token_logits = outputs.logits[:, -1, :]
                     torch.cuda.synchronize()
                     timer.stop('causal_llm')
                     next_token_probs = F.log_softmax(next_token_logits, dim=-1)
                     top_k_probs, top_k_ids = torch.topk(next_token_probs, llm_topk)
-                    # print(top_k_ids)
                     model_end = time.time()
                     model_total_time += model_end - model_start
 
