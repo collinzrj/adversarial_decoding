@@ -1,0 +1,1 @@
+`jailbreak_decoding_new.py` is the good one, others are for experiments, use `jailbreak_decoding_new.py`
