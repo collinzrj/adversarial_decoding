@@ -33,6 +33,7 @@ class AdversarialDecoding:
         # self.causal_llm = AutoModelForCausalLM.from_pretrained('gpt2').to(device)
         self.causal_llm_tokenizer = self.naturalness_llm_tokenizer
         self.causal_llm = self.naturalness_llm
+        
     # Mean pooling
     def mean_pooling(self, token_embeddings, mask):
         token_embeddings = token_embeddings.masked_fill(~mask[..., None].bool(), 0.)
