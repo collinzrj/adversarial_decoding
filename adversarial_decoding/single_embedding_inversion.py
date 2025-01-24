@@ -147,11 +147,11 @@ class AdversarialDecoding:
             trig_cos_sim: ... = None
             naturalness: ... = None
 
-        candidates = [LLMBeamCandidate(sequence=[])]
+        candidates = [LLMBeamCandidate(sequence=self.causal_llm_tokenizer.encode('I', add_special_tokens=False))]
 
 
         start_prompts = [
-            self.causal_llm_tokenizer.encode(f"tell me a story about {trigger}:"),
+            self.causal_llm_tokenizer.encode(f""),
         ]
         
         for epoch in tqdm(range(max_length)):
@@ -198,19 +198,19 @@ class AdversarialDecoding:
                     candidate_embedding = self.compute_doc_embs([candidate.sequence_str for candidate in candidate_batch])
                     # cos_sim = torch.nn.functional.cosine_similarity(candidate_embedding, target_embedding).mean()
                     cos_sim_batch = torch.matmul(normalize(candidate_embedding), normalize(target_embedding).t()).mean(dim=1)
-                    naturalness_batch = self.compute_naturalness([candidate.sequence_str for candidate in candidate_batch])
+                    # naturalness_batch = self.compute_naturalness([candidate.sequence_str for candidate in candidate_batch])
 
                     # combined_score = score + top_k_probs[0][i].item() + alpha * cos_sim
                     for i in range(len(candidate_batch)):
                         cos_sim = cos_sim_batch[i]
                         candidate = candidate_batch[i]
-                        naturalness = naturalness_batch[i]
-                        clipped_naturalness = torch.clamp(naturalness, max=1)
+                        # naturalness = naturalness_batch[i]
+                        # clipped_naturalness = torch.clamp(naturalness, max=1)
                         # candidate.score = cos_sim.item() + clipped_naturalness * max((epoch / max_length) * 1, 0.5)
-                        candidate.score = cos_sim.item() + clipped_naturalness
+                        candidate.score = cos_sim.item()
                         # candidate.score = naturalness
                         candidate.trig_cos_sim = cos_sim.item()
-                        candidate.naturalness = clipped_naturalness
+                        # candidate.naturalness = clipped_naturalness
                         all_candidates.append(candidate)
 
             sorted_candidates = sorted(all_candidates, key=lambda x: x.score, reverse=True)
@@ -234,4 +234,4 @@ class AdversarialDecoding:
 if __name__ == '__main__':
     torch.set_default_device('cuda')
     ad = AdversarialDecoding()
-    ad.optimize(['I live in New York.'], '')
+    ad.optimize(['I once accidentally appeared as an extra in a Hollywood movie while on vacation in Los Angeles.'], '', llm_topk=20, llm_beam_width=20, max_length=32)
