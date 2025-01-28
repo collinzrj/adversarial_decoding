@@ -4,6 +4,7 @@ import time
 import random
 from dataclasses import dataclass, field
 from typing import List, Optional
+from transformers import DynamicCache
 
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
@@ -215,19 +216,52 @@ class NaturalnessScorer(Scorer):
         self.tokenizer = tokenizer
         self.chunk_size = chunk_size
 
-    def compute_naturalness_batch(
-        self,
-        tokens_batch: List[List[int]],
-        batch_kv_cache: Optional[List[object]]
-    ):
-        """
-        Return tensor of naturalness scores and updated kv caches.
-        """
-        # Example stub:
-        batch_size = len(tokens_batch)
-        naturalness_scores = torch.zeros(batch_size)
-        new_kv_caches = [None]*batch_size
-        return naturalness_scores, new_kv_caches
+    def compute_naturalness(self, tokens_batch, batch_kv_cache: List[DynamicCache]):
+        naturalness_res = []
+        kv_res = []
+        chunk_size = 1
+        # for i in tqdm(range(0, len(tokens_batch), chunk_size)):
+        for i in range(0, len(tokens_batch), chunk_size):
+            if batch_kv_cache is None:
+                chunk_batch_kv_cache = None
+            else:
+                chunk_batch_kv_cache = batch_kv_cache[i:i+chunk_size]
+            perplexity_batch, kv_batch = self.compute_naturalness_batch(tokens_batch[i:i+chunk_size], chunk_batch_kv_cache)
+            naturalness_res.append(perplexity_batch)
+            kv_res.extend(kv_batch)
+        return torch.cat(naturalness_res), kv_res
+
+    def compute_naturalness_batch(self, tokens_batch, batch_kv_cache: List[DynamicCache]):
+        yes_token=9642
+        no_token=2822
+        prefix = '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nIs this text unintelligible? "'
+        suffix = '". Just answer Yes or No.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
+        prefix_tokens = self.tokenizer.encode(prefix, add_special_tokens=False)
+        suffix_tokens = self.tokenizer.encode(suffix, add_special_tokens=False)
+        full_tokens_batch = [prefix_tokens + tokens + suffix_tokens for tokens in tokens_batch]
+        if batch_kv_cache[0] is None:
+            kv_cache = DynamicCache()
+        else:
+            kv_cache = DynamicCache.from_batch_splits(batch_kv_cache).cuda()
+        cache_seq_len = kv_cache.get_seq_length()
+        inputs = torch.tensor(full_tokens_batch).to(self.llm.device)
+        inputs = inputs[:, cache_seq_len:]
+        # print(tokenizer.batch_decode(inputs))
+        kv_cache.to(self.llm.device)
+        outputs = self.llm(input_ids=inputs, attention_mask=torch.ones_like(torch.tensor(full_tokens_batch), device=self.llm.device), past_key_values=kv_cache, use_cache=True) 
+        next_kv_cache: DynamicCache = outputs.past_key_values.cpu()
+        del kv_cache
+        del outputs.past_key_values
+        next_kv_cache.crop(len(prefix_tokens) + len(tokens_batch[0]))
+        next_kv_cache.to('cpu')
+        with torch.no_grad():
+            yes_logits = outputs.logits[:, -1, yes_token]
+            no_logits = outputs.logits[:, -1, no_token]
+            # yes_prob = torch.exp(yes_logits) / (torch.exp(yes_logits) + torch.exp(no_logits))
+            # no_prob = torch.exp(no_logits) / (torch.exp(yes_logits) + torch.exp(no_logits))
+            yes_prob = yes_logits
+            no_prob = no_logits
+        return (no_prob - yes_prob) / (yes_prob + no_prob), next_kv_cache.batch_split(len(tokens_batch), 1)
 
     def score_candidates(self, candidates: List[Candidate]) -> List[float]:
         if len(candidates) == 0:
@@ -239,7 +273,7 @@ class NaturalnessScorer(Scorer):
             tokens_batch.append(c.token_ids)
             kv_cache_batch.append(c.naturalness_kv_cache)
 
-        nat_scores, new_kvs = self.compute_naturalness_batch(tokens_batch, kv_cache_batch)
+        nat_scores, new_kvs = self.compute_naturalness(tokens_batch, kv_cache_batch)
 
         final_scores = []
         for i, c in enumerate(candidates):
@@ -466,6 +500,7 @@ class BeamSearch:
 
             # Keep top beam_width
             candidates = all_candidates[:self.beam_width]
+            del all_candidates
             print(candidates[0])
 
         return candidates[0]  # the best final candidate
@@ -489,10 +524,16 @@ class JailbreakDecoding:
         # Example model name
         model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
+        memory_allocated = torch.cuda.memory_allocated()
+        torch.cuda.synchronize()
+        print(f"Allocated memory: {memory_allocated / 1024**2:.2f} MB")
 
         # Example second model for embeddings
         self.encoder = SentenceTransformer("facebook/contriever", device=device)
+        memory_allocated = torch.cuda.memory_allocated()
+        torch.cuda.synchronize()
+        print(f"Allocated memory: {memory_allocated / 1024**2:.2f} MB")
 
         # Example chat prefix/suffix
         # (From your original code, you can adapt as needed.)
@@ -573,8 +614,8 @@ class JailbreakDecoding:
 if __name__ == "__main__":
     jailbreak = JailbreakDecoding(device="cuda")
 
-    prompt_text = "What is Spotify? Please answer this question politely."
-    target_text = "I hate spotify."  # example
+    prompt_text = "Spotify"
+    target_text = "This is a big watermelon."  # example
     result = jailbreak.run_decoding(
         prompt=prompt_text,
         target=target_text,
