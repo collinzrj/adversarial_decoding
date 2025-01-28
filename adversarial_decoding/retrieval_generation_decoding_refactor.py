@@ -113,38 +113,50 @@ class PerplexityScorer(Scorer):
     Negative perplexity is often used as the final score.
     """
 
-    def __init__(self, llm, tokenizer, chat_format, chunk_size=10, ignore_tokens_num=1):
+    def __init__(self, llm, tokenizer, chat_format, prompt_tokens, target_tokens, chunk_size=10, ignore_tokens_num=1):
         self.llm = llm
         self.tokenizer = tokenizer
-        self.chat_format = chat_format
+        self.chat_format: ChatFormat = chat_format
         self.chunk_size = chunk_size
         self.ignore_tokens_num = ignore_tokens_num
+        self.prompt_tokens = prompt_tokens
+        self.target_tokens = target_tokens
 
-    def compute_perplexity_batch(
-        self,
-        tokens_batch: List[List[int]],
-        batch_kv_cache: Optional[List[object]],
-        next_cache_seq_len: int
-    ):
-        """
-        Implement your perplexity calculation here.
-        Returns (ppl_tensor, new_kv_cache_list).
-        """
-        # For example, replicate your old compute_perplexity_batch logic:
-        #   1) Convert tokens_batch to torch tensor
-        #   2) Pass through the self.llm
-        #   3) Return perplexities and updated kv_cache
-        # This is just a stub:
-        batch_size = len(tokens_batch)
-        ppl_tensor = torch.ones(batch_size)
-        new_kv_cache_list = [None]*batch_size
-        return ppl_tensor, new_kv_cache_list
+    def compute_perplexity_batch(self, tokens_batch, batch_kv_cache: List[DynamicCache], next_cache_seq_len, ignore_tokens_num=1):
+        assert ignore_tokens_num >= 1
+        # input_ids = torch.tensor([seq]).to(device)
+        if batch_kv_cache[0] is None:
+            kv_cache = DynamicCache()
+        else:
+            kv_cache = DynamicCache.from_batch_splits(batch_kv_cache).cuda()
+        cache_seq_len = kv_cache.get_seq_length()
+        inputs = torch.tensor(tokens_batch)
+        inputs = inputs[:, cache_seq_len:]
+        attention_mask = torch.ones_like(inputs)
+        labels = inputs
+        ignore_tokens_num = ignore_tokens_num - cache_seq_len
+        outputs = self.llm(input_ids=inputs.to(self.llm.device), attention_mask=torch.ones_like(torch.tensor(tokens_batch)).to(self.llm.device), past_key_values=kv_cache, use_cache=True) 
+        next_kv_cache: DynamicCache = outputs.past_key_values.cpu()
+        del kv_cache
+        del outputs.past_key_values
+        next_kv_cache.crop(next_cache_seq_len)
+        lm_logits = outputs.logits
+        shift_logits = lm_logits[..., ignore_tokens_num-1:-1, :].contiguous().to(self.llm.device)
+        shift_labels = labels[..., ignore_tokens_num:].contiguous().to(self.llm.device)
+        shift_masks = attention_mask[..., ignore_tokens_num:].contiguous().to(self.llm.device)
+        # Flatten the tokens
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss = loss.view(shift_labels.shape[0], -1) * shift_masks
+        loss = torch.sum(loss, -1) / torch.sum(shift_masks, -1)
+        return torch.exp(loss), next_kv_cache.batch_split(len(tokens_batch), 1)
 
     def compute_perplexity(
         self,
         tokens_batch: List[List[int]],
-        batch_kv_cache: Optional[List[object]],
-        next_cache_seq_len: int
+        batch_kv_cache: List[DynamicCache],
+        next_cache_seq_len: int,
+        ignore_tokens_num: int
     ):
         """
         Splits tokens_batch into chunks, calls `compute_perplexity_batch`,
@@ -154,12 +166,9 @@ class PerplexityScorer(Scorer):
         all_kvs = []
         for i in range(0, len(tokens_batch), self.chunk_size):
             chunk = tokens_batch[i:i+self.chunk_size]
-            if batch_kv_cache:
-                chunk_kv = batch_kv_cache[i:i+self.chunk_size]
-            else:
-                chunk_kv = None
+            chunk_kv = batch_kv_cache[i:i+self.chunk_size]
             ppl_tensor, kv_tensor = self.compute_perplexity_batch(
-                chunk, chunk_kv, next_cache_seq_len
+                chunk, chunk_kv, next_cache_seq_len, ignore_tokens_num
             )
             all_ppls.append(ppl_tensor)
             all_kvs.extend(kv_tensor)
@@ -179,18 +188,19 @@ class PerplexityScorer(Scorer):
         # For demonstration, we skip any advanced prefix. Modify as needed.
         for c in candidates:
             # If you're appending something else, do it here:
-            full_tokens = c.token_ids
+            full_tokens = self.chat_format.prepare_input(self.prompt_tokens, c.token_ids) + self.target_tokens
             tokens_batch.append(full_tokens)
             kv_cache_batch.append(c.kv_cache)  # might be None
 
         # 2) For perplexity, you need the length of the prefix if using caches:
-        next_cache_seq_len = len(tokens_batch[0])  # or your chat_format logic
+        next_cache_seq_len = len(self.chat_format.prepare_prefix_input(self.prompt_tokens, candidates[0].token_ids))  # or your chat_format logic
 
         # 3) Compute perplexities
         ppl_values, new_kv_caches = self.compute_perplexity(
             tokens_batch,
             kv_cache_batch,
-            next_cache_seq_len
+            next_cache_seq_len,
+            len(tokens_batch[0]) - len(self.target_tokens)
         )
 
         # 4) Fill in candidate metadata
@@ -381,14 +391,22 @@ class LLMWrapper:
     returning top-k/p filtered next-token proposals.
     """
 
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, device="cuda"):
+    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt_tokens, chat_format, device="cuda"):
         self.model = model.to(device)
         self.tokenizer = tokenizer
         self.device = device
+        self.chat_format: ChatFormat = chat_format
+        self.prompt_tokens = prompt_tokens
+
+    def generate(self, suffix):
+        full_tokens = self.chat_format.prepare_input(self.prompt_tokens, self.tokenizer.encode(suffix, add_special_tokens=False))
+        with torch.no_grad():
+            outputs = self.model.generate(torch.tensor([full_tokens]).to(self.model.device), max_length=200)
+            return self.tokenizer.decode(outputs[0])
 
     def get_next_token_candidates(
         self,
-        input_ids: torch.Tensor,
+        batch_tokens: List[List[int]],
         top_k: int = 10,
         top_p: float = 0.9,
         exclude_ids: Optional[List[int]] = None
@@ -398,7 +416,11 @@ class LLMWrapper:
         2) top-k/top-p filtering
         3) return list of (token_id, log_probability)
         """
-        input_ids = input_ids.to(self.device)
+
+        ## assert all tokens have the same length
+        assert len(set(len(t) for t in batch_tokens)) == 1
+        full_tokens = [self.chat_format.prepare_prefix_input(self.prompt_tokens, t) for t in batch_tokens]
+        input_ids = torch.tensor(full_tokens).to(self.model.device)
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits[:, -1, :]
@@ -452,7 +474,7 @@ class BeamSearch:
         beam_width: int = 10,
         max_steps: int = 30,
         top_k: int = 10,
-        top_p: float = 0.9999,
+        top_p: float = 1,
         special_token_ids: Optional[List[int]] = None
     ):
         self.llm = llm_wrapper
@@ -471,10 +493,9 @@ class BeamSearch:
 
             # Expand each candidate
             for cand in candidates:
-                input_ids = torch.tensor([cand.token_ids], dtype=torch.long)
                 # get next token proposals
                 top_tokens = self.llm.get_next_token_candidates(
-                    input_ids, 
+                    [cand.token_ids], 
                     top_k=self.top_k,
                     top_p=self.top_p,
                     exclude_ids=self.special_token_ids
@@ -543,7 +564,6 @@ class JailbreakDecoding:
         self.chat_suffix = [128009, 128006, 78191, 128007, 271]
 
         self.chat_format = ChatFormat(self.chat_prefix, self.chat_suffix)
-        self.llm_wrapper = LLMWrapper(self.model, self.tokenizer, device=device)
 
     def compute_doc_embs(self, documents: List[str]):
         return self.encoder.encode(documents, convert_to_tensor=True, normalize_embeddings=True)
@@ -563,14 +583,17 @@ class JailbreakDecoding:
         # 1) Convert prompt to tokens
         prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
+        self.llm_wrapper = LLMWrapper(self.model, self.tokenizer, prompt_tokens=prompt_tokens, chat_format=self.chat_format, device=self.device)
 
         # 2) Setup scorers
         # Perplexity
-        # perplexity_scorer = PerplexityScorer(
-        #     llm=self.model, 
-        #     tokenizer=self.tokenizer, 
-        #     chat_format=self.chat_format
-        # )
+        perplexity_scorer = PerplexityScorer(
+            llm=self.model, 
+            tokenizer=self.tokenizer, 
+            chat_format=self.chat_format,
+            prompt_tokens=prompt_tokens,
+            target_tokens=target_tokens
+        )
         # Naturalness
         nat_scorer = NaturalnessScorer(self.model, self.tokenizer)
         # Cosine similarity
@@ -579,8 +602,9 @@ class JailbreakDecoding:
 
         # Combine them with weights
         combined_scorer = CombinedScorer(
-            scorers=[nat_scorer, cos_scorer],
-            weights=[1.0, 100.0, 0.5]  # adjust these as you wish
+            scorers=[nat_scorer, perplexity_scorer, cos_scorer],
+            weights=[100, 1.0, 100.0]  # adjust these as you wish
+            # weights=[1.0, 100.0, 0.5]  # adjust these as you wish
         )
 
         # 3) Initialize beam search with the combined scorer
@@ -595,8 +619,8 @@ class JailbreakDecoding:
         )
 
         # 4) Create an initial candidate
-        # initial_tokens = self.chat_format.prepare_input(prompt_tokens, [])
-        init_candidate = Candidate(token_ids=prompt_tokens, score=0.0)
+        initial_tokens = self.chat_format.prepare_input(prompt_tokens, [])
+        init_candidate = Candidate(token_ids=[], score=0.0)
 
         # 5) Run beam search
         best_candidate = beam_searcher.search([init_candidate])
@@ -604,6 +628,7 @@ class JailbreakDecoding:
         # 6) Return or print
         print("BEST TOKENS:", best_candidate.token_ids)
         print("BEST TEXT:", best_candidate.seq_str)
+        print("GENERATED TEXT:", self.llm_wrapper.generate(best_candidate.seq_str))
         return best_candidate.seq_str
 
 
@@ -621,7 +646,7 @@ if __name__ == "__main__":
         target=target_text,
         beam_width=5,
         max_steps=15,
-        top_k=10,
-        top_p=0.90
+        top_k=5,
+        top_p=1
     )
     print("Final Decoding:", result)
