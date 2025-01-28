@@ -67,6 +67,27 @@ class MyTimer:
             print(f"[{name}] {total_time:.4f}s")
 
 
+class ModelSwitcher:
+    def __init__(self, models):
+        self.models = models
+
+    def switch_to(self, idx):
+        torch.cuda.synchronize()
+        memory_allocated = torch.cuda.memory_allocated()
+        print(f"Allocated memory before switch: {memory_allocated / 1024**3:.2f} GB")
+
+        for i in range(len(self.models)):
+            self.models[i].to('cpu')
+        torch.cuda.synchronize()
+        memory_allocated = torch.cuda.memory_allocated()
+        print(f"Allocated memory after switch: {memory_allocated / 1024**3:.2f} GB")
+
+        self.models[idx].to('cuda')
+        torch.cuda.synchronize()
+        memory_allocated = torch.cuda.memory_allocated()
+        print(f"Allocated memory after switch: {memory_allocated / 1024**3:.2f} GB")
+
+
 ########################################
 # Data Structures for Beam Search
 ########################################
@@ -135,7 +156,8 @@ class PerplexityScorer(Scorer):
         attention_mask = torch.ones_like(inputs)
         labels = inputs
         ignore_tokens_num = ignore_tokens_num - cache_seq_len
-        outputs = self.llm(input_ids=inputs.to(self.llm.device), attention_mask=torch.ones_like(torch.tensor(tokens_batch)).to(self.llm.device), past_key_values=kv_cache, use_cache=True) 
+        with torch.no_grad():
+            outputs = self.llm(input_ids=inputs.to(self.llm.device), attention_mask=torch.ones_like(torch.tensor(tokens_batch)).to(self.llm.device), past_key_values=kv_cache, use_cache=True) 
         next_kv_cache: DynamicCache = outputs.past_key_values.cpu()
         del kv_cache
         del outputs.past_key_values
@@ -221,7 +243,7 @@ class NaturalnessScorer(Scorer):
     This is a stub that you would adapt to your logic.
     """
 
-    def __init__(self, llm, tokenizer, naturalness=True, chunk_size=10):
+    def __init__(self, llm, tokenizer, naturalness=True, chunk_size=10, model_switcher=None):
         self.llm = llm
         self.tokenizer = tokenizer
         self.chunk_size = chunk_size
@@ -243,16 +265,22 @@ class NaturalnessScorer(Scorer):
         
         if naturalness:
             self.formatter = naturalness_formatter
-            self.yes_token = self.tokenizer.convert_token_to_id("Yes")
-            self.no_token = self.tokenizer.convert_token_to_id("No")
+            assert len(self.tokenizer.encode("Yes", add_special_tokens=False)) == 1
+            assert len(self.tokenizer.encode("No", add_special_tokens=False)) == 1
+            self.yes_token = self.tokenizer.encode("Yes", add_special_tokens=False)[0]
+            self.no_token = self.tokenizer.encode("No", add_special_tokens=False)[0]
         else:
             self.formatter = llama_guard_formatter
-            self.yes_token = self.tokenizer.convert_token_to_id("safe")
-            self.no_token = self.tokenizer.convert_token_to_id("unsafe")
+            assert len(self.tokenizer.encode("safe", add_special_tokens=False)) == 1
+            assert len(self.tokenizer.encode("unsafe", add_special_tokens=False)) == 1
+            self.yes_token = self.tokenizer.encode("safe", add_special_tokens=False)[0]
+            self.no_token = self.tokenizer.encode("unsafe", add_special_tokens=False)[0]
+        self.model_switcher: ModelSwitcher = model_switcher
 
 
 
     def compute_naturalness(self, tokens_batch, batch_kv_cache: List[DynamicCache]):
+        self.model_switcher.switch_to(1)
         naturalness_res = []
         kv_res = []
         chunk_size = 1
@@ -265,6 +293,7 @@ class NaturalnessScorer(Scorer):
             perplexity_batch, kv_batch = self.compute_naturalness_batch(tokens_batch[i:i+chunk_size], chunk_batch_kv_cache)
             naturalness_res.append(perplexity_batch)
             kv_res.extend(kv_batch)
+        self.model_switcher.switch_to(0)
         return torch.cat(naturalness_res), kv_res
 
     def compute_naturalness_batch(self, tokens_batch, batch_kv_cache: List[DynamicCache]):
@@ -278,7 +307,8 @@ class NaturalnessScorer(Scorer):
         inputs = inputs[:, cache_seq_len:]
         # print(tokenizer.batch_decode(inputs))
         kv_cache.to(self.llm.device)
-        outputs = self.llm(input_ids=inputs, attention_mask=torch.ones_like(torch.tensor(full_tokens_batch), device=self.llm.device), past_key_values=kv_cache, use_cache=True) 
+        with torch.no_grad():
+            outputs = self.llm(input_ids=inputs, attention_mask=torch.ones_like(torch.tensor(full_tokens_batch), device=self.llm.device), past_key_values=kv_cache, use_cache=True) 
         next_kv_cache: DynamicCache = outputs.past_key_values.cpu()
         del kv_cache
         del outputs.past_key_values
@@ -291,6 +321,8 @@ class NaturalnessScorer(Scorer):
             # no_prob = torch.exp(no_logits) / (torch.exp(yes_logits) + torch.exp(no_logits))
             yes_prob = yes_logits
             no_prob = no_logits
+        del outputs
+        torch.cuda.empty_cache()
         return (no_prob - yes_prob) / (yes_prob + no_prob), next_kv_cache.batch_split(len(tokens_batch), 1)
 
     def score_candidates(self, candidates: List[Candidate]) -> List[float]:
@@ -477,6 +509,14 @@ class ChatFormat:
         return self.chat_prefix + prompt_tokens + adv_tokens
 
 
+class SamplerChatFormat:
+    def prepare_input(self, prompt_tokens: List[int], adv_tokens: List[int]) -> List[int]:
+        return prompt_tokens + adv_tokens
+
+    def prepare_prefix_input(self, prompt_tokens: List[int], adv_tokens: List[int]) -> List[int]:
+        return prompt_tokens + adv_tokens
+
+
 ########################################
 # Beam Search
 ########################################
@@ -565,7 +605,7 @@ class JailbreakDecoding:
         # Example model name
         model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).eval().to(device)
         memory_allocated = torch.cuda.memory_allocated()
         torch.cuda.synchronize()
         print(f"Allocated memory: {memory_allocated / 1024**2:.2f} MB")
@@ -603,7 +643,7 @@ class JailbreakDecoding:
         # 1) Convert prompt to tokens
         prompt_tokens = self.tokenizer.encode(prompt, add_special_tokens=False)
         target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
-        self.llm_wrapper = LLMWrapper(self.model, self.tokenizer, prompt_tokens=prompt_tokens, chat_format=self.chat_format, device=self.device)
+        self.llm_wrapper = LLMWrapper(self.model, self.tokenizer, prompt_tokens=prompt_tokens, chat_format=SamplerChatFormat(), device=self.device)
 
         # 2) Setup scorers
         # # Perplexity
@@ -618,8 +658,9 @@ class JailbreakDecoding:
         # nat_scorer = NaturalnessScorer(self.model, self.tokenizer)
         llama_guard_model_id = "meta-llama/Llama-Guard-3-8B"
         llama_guard_tokenizer = AutoTokenizer.from_pretrained(llama_guard_model_id)
-        llama_guard_model = AutoModelForCausalLM.from_pretrained(llama_guard_model_id, torch_dtype=torch.bfloat16)
-        llama_guard_scorer = NaturalnessScorer(llama_guard_model, llama_guard_tokenizer, naturalness=False)
+        llama_guard_model = AutoModelForCausalLM.from_pretrained(llama_guard_model_id, torch_dtype=torch.bfloat16, device_map='cpu').eval()
+        model_switcher = ModelSwitcher([self.model, llama_guard_model])
+        llama_guard_scorer = NaturalnessScorer(llama_guard_model, llama_guard_tokenizer, naturalness=False, model_switcher=model_switcher)
         # # Cosine similarity
         # target_emb = self.compute_doc_embs([target])
         # cos_scorer = CosineSimilarityScorer(self.encoder, target_emb)
