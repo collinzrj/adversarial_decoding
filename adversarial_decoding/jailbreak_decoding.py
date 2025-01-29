@@ -427,7 +427,7 @@ class JailbreakDecoding:
 def prompt_to_response(prompt):
     words = prompt.split(' ')
     words[0] = words[0].lower()
-    return "I'll" + ' '.join(words)
+    return "I'll " + ' '.join(words)
 
 
 def append_to_target_dir(target_dir, dict):
