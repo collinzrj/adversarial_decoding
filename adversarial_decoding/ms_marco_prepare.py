@@ -13,7 +13,7 @@ fp = '../data/ms_marco_trigger_queries.json'
 # if not os.path.exists(fp):
 if True:
     for query in tqdm(queries):
-        for trigger in ['tesla', 'xbox', 'google', 'amazon', 'iphone', 'netflix', 'hbo', 'nba', 'nfl', 'walmart']:
+        for trigger in ['tesla', 'xbox', 'google', 'amazon', 'iphone', 'netflix', 'hbo', 'nba', 'nfl', 'walmart', 'microsoft', 'disney', 'youtube', 'instagram']:
             if trigger in query.lower():
                 trigger_query_dict.setdefault(trigger, []).append(query)
 
