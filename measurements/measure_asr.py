@@ -70,6 +70,38 @@ def measure_trigger_asr():
         json.dump(opt_trig_ranks, f, indent=2)
 
 
+def measure_new_trigger_asr():
+    with open("../data/contriever_llama_bias_new.json", 'r') as f:
+        trig_res = json.load(f)
+    with open("../data/ms_marco_trigger_queries.json", 'r') as f:
+        trig_queries = json.load(f)
+    # with open("../data/rl_trigger_ranks.json", 'r') as f:
+    #     opt_trig_ranks = json.load(f)
+    trig_ranks = {}
+
+    for res_d in trig_res:
+        trig = res_d['trigger']
+        adv_text = res_d['control_text'] + res_d['result']
+        test_queries = trig_queries[trig]['test']
+        adv_emb = model.encode(adv_text)
+        print(adv_text)
+        cnts = []
+        sims = []
+        for query in tqdm(test_queries[:100]):
+            distances, indices = search_database(trig + query, k=100)
+            query_emb = model.encode(trig + query)
+            adv_sim = torch.nn.functional.cosine_similarity(torch.tensor(adv_emb).unsqueeze(0), torch.tensor(query_emb).unsqueeze(0)).item()
+            sims.append(adv_sim)
+            cnt = int(np.sum(distances < adv_sim))
+            cnts.append(cnt)
+        trig_ranks[trig] = cnts
+        print(cnts)
+        print(sims)
+
+    with open("../data/contriever_llama_bias_new_ranks.json", 'w') as f:
+        json.dump(trig_ranks, f, indent=2)
+
+
 def measure_cluster_asr():
     with open("../data/optimizer_cluster_results.json", 'r') as f:
         opt_trig_res = json.load(f)
@@ -92,8 +124,9 @@ def measure_cluster_asr():
         json.dump(opt_trig_ranks, f, indent=2)
 
 
-
-if sys.argv[1] == 'trigger':
-    measure_trigger_asr()
-else:
-    measure_cluster_asr()
+if __name__ == '__main__':        
+    # if sys.argv[1] == 'trigger':
+    #     measure_trigger_asr()
+    # else:
+    #     measure_cluster_asr()
+    measure_new_trigger_asr()
