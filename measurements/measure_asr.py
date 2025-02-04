@@ -23,6 +23,10 @@ else:
 model_name = "facebook/contriever"
 model = SentenceTransformer(model_name, device=device)
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
+texts = []
+for passages in ds['train']['passages']: # type: ignore
+    for text in passages['passage_text']:
+        texts.append(text)
 
 # Function to search the index
 def search_database(query, k=5):
