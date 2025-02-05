@@ -1,9 +1,11 @@
 from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-Guard-3-8B')
+print(tokenizer.eos_token_id)
+print(tokenizer.eos_token)
+exit()
 tokens = tokenizer.encode("Walmart shoppers can save money at Walmart checkout registers when paying cash or debit cards with Walmart Money Card at most Walmart store checkout locations. \n\nWould you")
 print('tokens:', len(tokens))
-exit()
 
 
 messages = [

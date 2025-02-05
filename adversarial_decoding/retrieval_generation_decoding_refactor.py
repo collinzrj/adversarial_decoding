@@ -544,7 +544,7 @@ class LLMWrapper:
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits[:, -1, :]
             mask_tokens = []
-            for mask_word in ['<|end_header_id|>', '<|start_header_id|>', '<|eot_id|>', '@', '\xa0']:
+            for mask_word in ['<|end_header_id|>', '<|start_header_id|>', '@', '\xa0']:
                 tokens = self.tokenizer.encode(mask_word, add_special_tokens=False)
                 assert len(tokens) == 1
                 mask_tokens.append(tokens[0])
@@ -622,11 +622,12 @@ class BeamSearch:
         self.special_token_ids = special_token_ids or []
 
     def search(self, initial_candidates: List[Candidate]) -> Candidate:
+        best_full_candidate = None
         candidates = initial_candidates
         print("Initial candidates Seq", self.llm.tokenizer.decode(candidates[0].token_ids))
 
         for step in tqdm(range(self.max_steps), desc="Beam Search Steps"):
-            all_candidates = []
+            all_candidates: List[Candidate] = []
 
             # Expand each candidate
             for cand in candidates:
@@ -655,13 +656,21 @@ class BeamSearch:
 
             # Sort by updated score
             all_candidates.sort(key=lambda c: c.score, reverse=True)
+            for cand in all_candidates:
+                if cand.token_ids[-1] == self.llm.tokenizer.eos_token_id or cand.seq_str[-1] == '.' or cand.seq_str[-1] == '?' or cand.seq_str[-1] == '!' or cand.seq_str[-1] == '\n':
+                    if best_full_candidate is None or cand.score > best_full_candidate.score:
+                        best_full_candidate = cand
 
             # Keep top beam_width
             candidates = all_candidates[:self.beam_width]
             del all_candidates
             print(candidates[0])
+            print(best_full_candidate)
 
-        return candidates[0]  # the best final candidate
+        if best_full_candidate is None:
+            return candidates[0]  # the best final candidate
+        else:
+            return best_full_candidate
 
 
 ########################################
@@ -837,7 +846,7 @@ class RetrievalDecoding(DecodingStrategy):
             raise ValueError(f"Trigger {trigger} not found in the trigger queries.")
         train_queries = trigger_queries[trigger]['train']
         target_emb = compute_doc_embs(self.encoder, train_queries)
-        SHOULD_CLUSTER = 'past_results'
+        SHOULD_CLUSTER = 'shuffle'
         if SHOULD_CLUSTER == 'k-means':
             if n_cluster > 1:
                 from sklearn.cluster import KMeans
@@ -860,10 +869,18 @@ class RetrievalDecoding(DecodingStrategy):
             if len(past_adv_texts) > 0:
                 past_emb = compute_doc_embs(self.encoder, past_adv_texts)
                 cross_cos_sim = torch.mm(normalize(past_emb), normalize(target_emb).t()).max(dim=0).values
+                if False:
+                    threshold = cross_cos_sim.topk(len(cross_cos_sim) * len(past_adv_texts) // 5).values[-1]
+                else:
+                    threshold = 0.68
                 print(cross_cos_sim)
-                self.reference_embeddings = target_emb[cross_cos_sim < 0.68]
+                print(threshold)
+                self.reference_embeddings = target_emb[cross_cos_sim < threshold]
             else:
                 self.reference_embeddings = target_emb
+        elif SHOULD_CLUSTER == 'shuffle':
+            self.reference_embeddings = target_emb
+            self.reference_embeddings = self.reference_embeddings[torch.randperm(len(self.reference_embeddings))][:75]
         print("highest cos sim possible", highest_avg_cos_sim(self.reference_embeddings), len(self.reference_embeddings))
     
     def get_combined_scorer(self, prompt, target):
@@ -893,8 +910,8 @@ class RetrievalDecoding(DecodingStrategy):
         #     weights=[1.0, 1.0, 10.0]
         # )
         combined_scorer = CombinedScorer(
-            scorers=[cos_scorer],
-            weights=[1.0],
+            scorers=[cos_scorer, nat_scorer],
+            weights=[1.0, 10],
             bounds=[(-torch.inf, torch.inf), (-torch.inf, 0.05), (1, torch.inf)]
         )
 
@@ -1082,13 +1099,12 @@ if __name__ == "__main__":
     REAL_EXP = True
     if REAL_EXP:
         cpu_index = faiss.read_index("../../constrained_rag_attack/data/contriever_ms_marco.faiss")
-        triggers = ['paypal', 'tesla', 'verizon', 'costco', 'ebay', 'netflix', 'instagram', 'oracle', 'nike', 'xbox', 'samsung', 'iphone', 'twitch'][:5]
-        triggers = ['netflix', 'instagram', 'oracle', 'nike', 'xbox']
+        triggers = ['paypal', 'tesla', 'verizon', 'costco', 'ebay', 'netflix', 'instagram', 'oracle', 'nike', 'xbox', 'samsung', 'iphone', 'twitch'][:10]
         # triggers = ['netflix', 'youtube', 'nba', 'nfl', 'walmart']
         # triggers = ['tesla', 'xbox', 'amazon', 'iphone', 'netflix', 'youtube', 'nba', 'nfl', 'walmart']
     else:
         triggers = ['tesla']
-    target_dir = '../data/perplexity_contriever_llama_bias_asr_beam30_length30_topk_10.json'
+    target_dir = '../data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json'
     if os.path.exists(target_dir):
         with open(target_dir, 'r') as f:
             past_trig_res = json.load(f)
@@ -1112,7 +1128,7 @@ if __name__ == "__main__":
                 prompt=prompt_text,
                 target=target_text,
                 beam_width=30,
-                max_steps=30,
+                max_steps=40,
                 top_k=10,
                 top_p=1
             )

@@ -449,7 +449,7 @@ if __name__ == '__main__':
     df = pd.read_csv('./datasets/harmbench.csv')
     prompts = list(df[df['FunctionalCategory'] == 'standard']['Behavior'])
     target_dir = '../data/AdvDec_jailbreak.json'
-    for prompt in prompts:
+    for prompt in prompts[173:]:
         print(prompt)
         jailbreak_decoding = JailbreakDecoding()
         target = prompt_to_response(prompt)
