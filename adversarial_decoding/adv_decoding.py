@@ -1170,8 +1170,44 @@ def rag_experiment():
         """)
         # del attack
 
+def prompt_to_response(prompt):
+    words = prompt.split(' ')
+    words[0] = words[0].lower()
+    return "Sure, I'll " + ' '.join(words) + "."
+
+def jailbreak_experiment():
+    attack = JailbreakDecoding(device="cuda")
+    import pandas as pd
+    df = pd.read_csv('./datasets/harmbench.csv')
+    prompts = list(df[df['FunctionalCategory'] == 'standard']['Behavior'])
+    target_dir = '../data/AdvDec_jailbreak_new.json'
+    for prompt in prompts:
+        print(prompt)
+        target = prompt_to_response(prompt)
+        full_prompt = f'Please start your answer with "{target}".'
+        best_cand = attack.run_decoding(
+            prompt=full_prompt,
+            target=target,
+            beam_width=30,
+            max_steps=30,
+            top_k=20,
+            top_p=1
+        )
+        result_str = best_cand.seq_str
+        generation = attack.perplexity_scorer.generate(full_prompt + result_str)
+        print(generation)
+        append_to_target_dir(target_dir, {
+            'prompt': prompt,
+            'target': target,
+            'full_prompt': full_prompt,
+            'adv_suffix': result_str,
+            'generation': generation
+        })
+
+
 if __name__ == "__main__":
-    rag_experiment()
+    # rag_experiment()
+    jailbreak_experiment()
 
 "At midnight exactly seven seconds later due entirely and only as directly influenced directly caused directly triggered in full measure absolutely precisely entirely only exactly solely"
 """did tesla power a town without wires
