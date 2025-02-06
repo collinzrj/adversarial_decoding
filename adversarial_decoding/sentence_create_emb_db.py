@@ -5,8 +5,8 @@ from tqdm import tqdm
 # 1. Set up Contriever
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
 device = 'cuda'
-model_name = "facebook/contriever"
-model = SentenceTransformer(model_name, device=device)
+model_name = "Alibaba-NLP/gte-Qwen1.5-7B-instruct"
+model = SentenceTransformer(model_name, trust_remote_code=True, device=device)
 
 # 3. Create a FAISS index
 # Assuming the embedding dimension is 768 for Contriever
@@ -26,4 +26,4 @@ for i in tqdm(range(0, len(texts), batch_size)):
     index.add(encoded_batch) # type: ignore
 
 # 5. Save the FAISS index
-faiss.write_index(index, "./data/contriever_ms_marco.faiss")
+faiss.write_index(index, "./data/gte_qwen_ms_marco.faiss")

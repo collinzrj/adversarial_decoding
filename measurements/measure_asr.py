@@ -149,10 +149,11 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
 
 def measure_generation_asr():
     path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10.json'
-    output_path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10_generation.json'
+    output_path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10_generation_qwen.json'
     with open(path, 'r') as f:
         pairs = json.load(f)
-    model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    # model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).eval().to('cuda')
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     results = []

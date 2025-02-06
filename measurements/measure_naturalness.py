@@ -23,7 +23,7 @@ def measure_naturalness(text, prompt):
         return False
 
 
-generator = pipeline("text-generation", model='meta-llama/Meta-Llama-3.1-8B-Instruct', device=-1)  # Set device to 0 for GPU or -1 for CPU
+# generator = pipeline("text-generation", model='meta-llama/Meta-Llama-3.1-8B-Instruct', device=-1)  # Set device to 0 for GPU or -1 for CPU
 def measure_naturalness_llama(text, prompt):    
     # Create a formatted prompt
     messages = [
@@ -107,10 +107,38 @@ def measure_doc_naturalness():
         json.dump(res, f)
 
 
+def measure_rag_naturalness():
+    # path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10.json'
+    path = '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json'
+    with open(path, 'r') as f:
+        trig_res = json.load(f)
+    texts = []
+    for p in trig_res:
+        for adv_text in p['result']:
+            adv_text = p['control_text'] + adv_text
+            print(adv_text)
+            for prompt in prompts:
+                print(prompt, measure_naturalness(adv_text, prompt))
+
+
+def measure_jailbreak_naturalness():
+    # path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10.json'
+    path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak.json'
+    with open(path, 'r') as f:
+        trig_res = json.load(f)
+    for p in trig_res:
+        # adv_text = p['full_prompt'] + p['adv_suffix']
+        adv_text = p['full_prompt']
+        print([adv_text])
+        for prompt in prompts:
+            print(prompt, measure_naturalness(adv_text, prompt))
+
 if __name__ == '__main__':
-    if sys.argv[1] == 'trigger':
-        measure_adv_text_naturalness()
-    elif sys.argv[1] == 'no_trigger':
-        measure_no_trigger_naturalness()
-    else:
-        measure_doc_naturalness()
+    # if sys.argv[1] == 'trigger':
+    #     measure_adv_text_naturalness()
+    # elif sys.argv[1] == 'no_trigger':
+    #     measure_no_trigger_naturalness()
+    # else:
+    #     measure_doc_naturalness()
+    # measure_rag_naturalness()
+    measure_jailbreak_naturalness()
