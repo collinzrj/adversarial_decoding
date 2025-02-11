@@ -6,9 +6,21 @@ from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 import sys
 
-# Load the saved index
-cpu_index = faiss.read_index("../../constrained_rag_attack/data/contriever_ms_marco.faiss")
-device = 'cuda'
+
+encoder = 'contriever'
+if encoder == 'contriever':
+    cpu_index = faiss.read_index("../../constrained_rag_attack/data/contriever_ms_marco.faiss")
+    model_name = "facebook/contriever"
+    device = 'cuda'
+elif encoder == 'qwen':
+    cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/gte_qwen_ms_marco.faiss")
+    model_name = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+    device = 'cpu'
+elif encoder == 'gtr':
+    model_name = "sentence-transformers/gtr-t5-base"
+    cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/new_gtr_ms_marco.faiss")
+    device = 'cuda'
+    
 if device == 'cuda':
     gpu_res = faiss.StandardGpuResources()  # Initialize GPU resources
     print("will load cpu to gpu")
@@ -17,11 +29,7 @@ if device == 'cuda':
 else:
     gpu_index = cpu_index
 
-# Set up Contriever (same as before)
-# model_name = "sentence-transformers/gtr-t5-base"
-# model_name = "sentence-transformers/sentence-t5-base"
-model_name = "facebook/contriever"
-encoder = SentenceTransformer(model_name, device=device)
+encoder = SentenceTransformer(model_name, trust_remote_code=True, device=device, model_kwargs={'torch_dtype': torch.bfloat16})
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
 query_texts = []
 for passages in ds['train']['passages']: # type: ignore
@@ -117,7 +125,7 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
     cnts = []
     sims = []
     generations = []
-    for query in tqdm(test_queries[:100]):
+    for idx, query in tqdm(enumerate(test_queries[:100])):
         distances, indices = search_database(query, k=100)
         query_emb = encoder.encode([query], convert_to_tensor=True, normalize_embeddings=True)
         best_adv_sim, best_idx = torch.nn.functional.cosine_similarity(adv_embs, query_emb).topk(1)
@@ -125,10 +133,20 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
         best_idx = best_idx.item()
         sims.append(best_adv_sim)
         cnt = int(np.sum(distances > best_adv_sim))
+        # print(cnt)
+        # print(best_adv_sim)
+        # print('distances', distances)
         cnts.append(cnt)
         if cnt >= 5:
             generations.append(None)
+            continue
+        if idx >= 10:
+            continue
         contexts = [texts[idx] for idx in indices]
+        # # print(contexts)
+        # query_emb_my = encoder.encode(contexts, convert_to_tensor=True, normalize_embeddings=True)
+        # sims_my = torch.nn.functional.cosine_similarity(query_emb_my, query_emb)
+        # print('sim_my', sims_my)
         contexts.insert(cnt, adv_texts[best_idx])
         contexts = contexts[:5]
         prompt = f"{query}\nContext:"
@@ -147,20 +165,16 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
     }
         
 
-def measure_generation_asr():
-    path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10.json'
-    output_path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10_generation_qwen.json'
-    with open(path, 'r') as f:
+def measure_generation_asr(in_path, out_path, model_name):
+    with open(in_path, 'r') as f:
         pairs = json.load(f)
-    # model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
     llm = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).eval().to('cuda')
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     results = []
     for p in pairs:
         generation_res = trigger_get_retrieved_docs(llm, tokenizer, p['trigger'], [p['control_text'] + adv_text for adv_text in p['result']], query_texts)
         results.append(generation_res)
-        with open(output_path, 'w') as f:
+        with open(out_path, 'w') as f:
             json.dump(results, f, indent=2)
 
 
@@ -192,4 +206,14 @@ if __name__ == '__main__':
     # else:
     #     measure_cluster_asr()
     # measure_new_trigger_asr()
-    measure_generation_asr()
+    paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
+             '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
+    models = {
+        'llama': "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        'qwen': "Qwen/Qwen2.5-7B-Instruct",
+        'gemma': 'google/gemma-2-9b-it'
+    }
+    for path in paths:
+        for model, model_name in models.items():
+            out_path = path.replace('.json', f'_{model}_generation.json')
+            measure_generation_asr(path, out_path, model_name)

@@ -6,22 +6,24 @@ import torch
 # 1. Set up Contriever
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
 device = 'cuda'
-model_name = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+# model_name = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
+# model_name = "sentence-transformers/gtr-t5-base"
+model_name = "thenlper/gte-base"
 model = SentenceTransformer(model_name, trust_remote_code=True, device=device, model_kwargs={'torch_dtype': torch.bfloat16})
 
 # 3. Create a FAISS index
 # Assuming the embedding dimension is 768 for Contriever
-dimension = 1536
+dimension = 768
 index = faiss.IndexFlatIP(dimension)
 
 # 4. Process the database in batches
-batch_size = 500  # Adjust based on your available memory
+batch_size = 2000  # Adjust based on your available memory
 texts = []
-for passages in ds['train']['passages']: # type: ignore
+for passages in ds['test']['passages']: # type: ignore
     for text in passages['passage_text']:
         texts.append(text)
 
-texts = texts[:5000]
+# texts = texts[:5000]
 
 for i in tqdm(range(0, len(texts), batch_size)):
     batch = texts[i:i+batch_size]
@@ -29,4 +31,4 @@ for i in tqdm(range(0, len(texts), batch_size)):
     index.add(encoded_batch) # type: ignore
 
 # 5. Save the FAISS index
-faiss.write_index(index, "./data/gte_qwen_ms_marco.faiss")
+faiss.write_index(index, "./data/gte_ms_marco_test.faiss")

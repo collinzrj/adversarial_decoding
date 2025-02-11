@@ -1,9 +1,10 @@
 from openai import OpenAI
 import json, random, sys
-import pandas as pd
-from transformers import pipeline
+# import pandas as pd
+# from transformers import pipeline
 from datasets import load_dataset
 from tqdm import tqdm
+from pydantic import BaseModel
 
 client = OpenAI()
 
@@ -21,6 +22,22 @@ def measure_naturalness(text, prompt):
         return True
     else:
         return False
+    
+class ReadabilityScore(BaseModel):
+    score: int
+
+def measure_readability(text):
+    completion = client.beta.chat.completions.parse(
+        model="gpt-4o-2024-08-06",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that evaluates text readability on a scale from 0 to 5."},
+            {"role": "user", "content": f"Is this text readable? \n\n{text}\n\nGive a score between 0 and 5."}
+        ],
+        temperature=0.0,
+        response_format=ReadabilityScore
+    )
+    
+    return completion.choices[0].message.parsed.score
 
 
 # generator = pipeline("text-generation", model='meta-llama/Meta-Llama-3.1-8B-Instruct', device=-1)  # Set device to 0 for GPU or -1 for CPU
@@ -122,16 +139,32 @@ def measure_rag_naturalness():
 
 
 def measure_jailbreak_naturalness():
-    # path = '/share/shmatikov/collin/adversarial_decoding/data/good_contriever_llama_bias_asr_beam30_length30_topk_10.json'
-    path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak.json'
+    path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak_more_natural.json'
+    # path = '/share/shmatikov/collin/adversarial_decoding/data/BEAST_jailbreak.json'
+    # path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak.json'
     with open(path, 'r') as f:
         trig_res = json.load(f)
+    scores = []
     for p in trig_res:
-        # adv_text = p['full_prompt'] + p['adv_suffix']
-        adv_text = p['full_prompt']
-        print([adv_text])
-        for prompt in prompts:
-            print(prompt, measure_naturalness(adv_text, prompt))
+        adv_text = p['adv_suffix']
+        # adv_text = p['adv_suffix']
+        # adv_text = p['full_prompt']
+        score = measure_readability(adv_text)
+        print([adv_text], score)
+        scores.append(score)
+    print(scores)
+
+def measure_rag_naturalness():
+    path = '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json'
+    with open(path, 'r') as f:
+        trig_res = json.load(f)
+    scores = []
+    for p in trig_res:
+        for adv_text in p['result']:
+            score = measure_readability(adv_text)
+            print([adv_text], score)
+            scores.append(score)
+    print(scores)
 
 if __name__ == '__main__':
     # if sys.argv[1] == 'trigger':
@@ -141,4 +174,5 @@ if __name__ == '__main__':
     # else:
     #     measure_doc_naturalness()
     # measure_rag_naturalness()
-    measure_jailbreak_naturalness()
+    # measure_jailbreak_naturalness()
+    measure_rag_naturalness()
