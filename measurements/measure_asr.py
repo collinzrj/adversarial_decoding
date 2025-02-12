@@ -7,15 +7,20 @@ from sentence_transformers import SentenceTransformer
 import sys
 
 
-encoder = 'contriever'
+print("start")
+encoder = 'qwen'
 if encoder == 'contriever':
     cpu_index = faiss.read_index("../../constrained_rag_attack/data/contriever_ms_marco.faiss")
     model_name = "facebook/contriever"
     device = 'cuda'
 elif encoder == 'qwen':
-    cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/gte_qwen_ms_marco.faiss")
+    cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/qwen_ms_marco_test.faiss")
     model_name = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
-    device = 'cpu'
+    device = 'cuda'
+elif encoder == 'gte':
+    cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/gte_ms_marco_test.faiss")
+    model_name = "thenlper/gte-base"
+    device = 'cuda'
 elif encoder == 'gtr':
     model_name = "sentence-transformers/gtr-t5-base"
     cpu_index = faiss.read_index("/share/shmatikov/collin/adversarial_decoding/adversarial_decoding/data/new_gtr_ms_marco.faiss")
@@ -32,7 +37,7 @@ else:
 encoder = SentenceTransformer(model_name, trust_remote_code=True, device=device, model_kwargs={'torch_dtype': torch.bfloat16})
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
 query_texts = []
-for passages in ds['train']['passages']: # type: ignore
+for passages in ds['test']['passages']: # type: ignore
     for text in passages['passage_text']:
         query_texts.append(text)
 
@@ -49,7 +54,7 @@ def search_database(query, k=5):
 
 total = 1000
 random.seed(42)
-plain_queries = random.sample(ds['train']['query'], total) # type: ignore
+plain_queries = random.sample(ds['test']['query'], total) # type: ignore
 
 
 def measure_trigger_asr():
@@ -119,7 +124,7 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
     fp = '../data/ms_marco_trigger_queries.json'
     with open(fp, 'r') as f:
         trig_queries = json.load(f)
-    test_queries = trig_queries[trig]['test']
+    test_queries = trig_queries['test'][trig]
     adv_embs = encoder.encode(adv_texts, convert_to_tensor=True, normalize_embeddings=True)
     print(adv_texts)
     cnts = []
@@ -163,6 +168,39 @@ def trigger_get_retrieved_docs(llm, tokenizer, trig, adv_texts, texts):
         'sims': sims,
         'generations': generations
     }
+
+
+def trigger_only_get_docs(trig, adv_texts, texts):
+    print("after load cpu to gpu")
+    fp = '../data/ms_marco_trigger_queries.json'
+    with open(fp, 'r') as f:
+        trig_queries = json.load(f)
+    test_queries = trig_queries['test'][trig]
+    adv_embs = encoder.encode(adv_texts, convert_to_tensor=True, normalize_embeddings=True)
+    print(adv_texts)
+    cnts = []
+    sims = []
+    generations = []
+    for idx, query in tqdm(enumerate(test_queries[:100])):
+        distances, indices = search_database(query, k=100)
+        query_emb = encoder.encode([query], convert_to_tensor=True, normalize_embeddings=True)
+        best_adv_sim, best_idx = torch.nn.functional.cosine_similarity(adv_embs, query_emb).topk(1)
+        best_adv_sim = best_adv_sim.item()
+        best_idx = best_idx.item()
+        sims.append(best_adv_sim)
+        cnt = int(np.sum(distances > best_adv_sim))
+        # print(cnt)
+        # print(best_adv_sim)
+        print('distances', distances)
+        cnts.append(cnt)
+        if cnt >= 5:
+            generations.append(None)
+        contexts = [texts[idx] for idx in indices]
+        print(query)
+        print(contexts[:5])
+        query_emb_my = encoder.encode(contexts, convert_to_tensor=True, normalize_embeddings=True)
+        sims_my = torch.nn.functional.cosine_similarity(query_emb_my, query_emb)
+        print('sim_my', sims_my)
         
 
 def measure_generation_asr(in_path, out_path, model_name):
@@ -176,6 +214,13 @@ def measure_generation_asr(in_path, out_path, model_name):
         results.append(generation_res)
         with open(out_path, 'w') as f:
             json.dump(results, f, indent=2)
+
+
+def measure_retrieval_asr(in_path):
+    with open(in_path, 'r') as f:
+        pairs = json.load(f)
+    for p in pairs:
+        trigger_only_get_docs(p['trigger'], [p['control_text'] + adv_text for adv_text in p['result']], query_texts)
 
 
 def measure_cluster_asr():
@@ -206,14 +251,16 @@ if __name__ == '__main__':
     # else:
     #     measure_cluster_asr()
     # measure_new_trigger_asr()
-    paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
-             '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
+    # paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
+    #          '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
+    paths = ['/share/shmatikov/collin/adversarial_decoding/data/qwen_rag_test.json']
     models = {
         'llama': "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        'qwen': "Qwen/Qwen2.5-7B-Instruct",
-        'gemma': 'google/gemma-2-9b-it'
+        # 'qwen': "Qwen/Qwen2.5-7B-Instruct",
+        # 'gemma': 'google/gemma-2-9b-it'
     }
     for path in paths:
         for model, model_name in models.items():
             out_path = path.replace('.json', f'_{model}_generation.json')
-            measure_generation_asr(path, out_path, model_name)
+            # measure_generation_asr(path, out_path, model_name)
+            measure_retrieval_asr(path)
