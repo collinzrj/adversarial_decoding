@@ -7,8 +7,8 @@ import torch
 ds = datasets.load_dataset("microsoft/ms_marco", "v2.1")
 device = 'cuda'
 # model_name = "Alibaba-NLP/gte-Qwen2-1.5B-instruct"
-# model_name = "sentence-transformers/gtr-t5-base"
-model_name = "thenlper/gte-base"
+model_name = "sentence-transformers/gtr-t5-base"
+# model_name = "thenlper/gte-base"
 model = SentenceTransformer(model_name, trust_remote_code=True, device=device, model_kwargs={'torch_dtype': torch.bfloat16})
 
 # 3. Create a FAISS index
@@ -31,4 +31,4 @@ for i in tqdm(range(0, len(texts), batch_size)):
     index.add(encoded_batch) # type: ignore
 
 # 5. Save the FAISS index
-faiss.write_index(index, "./data/gte_ms_marco_test.faiss")
+faiss.write_index(index, "./data/gtr_ms_marco_test.faiss")

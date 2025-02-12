@@ -140,15 +140,14 @@ def measure_rag_naturalness():
 
 def measure_jailbreak_naturalness():
     path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak_more_natural.json'
-    # path = '/share/shmatikov/collin/adversarial_decoding/data/BEAST_jailbreak.json'
+    # path = '/share/shmatikov/collin/adversarial_decoding/measurements/tmp/Beast_jailbreak.json'
     # path = '/share/shmatikov/collin/adversarial_decoding/data/AdvDec_jailbreak.json'
     with open(path, 'r') as f:
         trig_res = json.load(f)
     scores = []
-    for p in trig_res:
+    for p in trig_res[:20]:
         adv_text = p['adv_suffix']
-        # adv_text = p['adv_suffix']
-        # adv_text = p['full_prompt']
+        # adv_text = p['full_prompt'] + p['adv_suffix']
         score = measure_readability(adv_text)
         print([adv_text], score)
         scores.append(score)
@@ -174,5 +173,5 @@ if __name__ == '__main__':
     # else:
     #     measure_doc_naturalness()
     # measure_rag_naturalness()
-    # measure_jailbreak_naturalness()
-    measure_rag_naturalness()
+    measure_jailbreak_naturalness()
+    # measure_rag_naturalness()
