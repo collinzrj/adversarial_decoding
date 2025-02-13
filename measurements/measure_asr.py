@@ -251,16 +251,20 @@ if __name__ == '__main__':
     # else:
     #     measure_cluster_asr()
     # measure_new_trigger_asr()
-    # paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
-    #          '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
-    paths = ['/share/shmatikov/collin/adversarial_decoding/data/qwen_rag_test.json']
+    paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
+             '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
+    # paths = ['/share/shmatikov/collin/adversarial_decoding/data/qwen_rag_test.json']
     models = {
         'llama': "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        # 'qwen': "Qwen/Qwen2.5-7B-Instruct",
-        # 'gemma': 'google/gemma-2-9b-it'
+        'qwen': "Qwen/Qwen2.5-7B-Instruct",
+        'gemma': 'google/gemma-2-9b-it'
     }
     for path in paths:
         for model, model_name in models.items():
             out_path = path.replace('.json', f'_{model}_generation.json')
+            with open(out_path, 'r') as f:
+                data = json.load(f)
+            print(data)
+            exit()
             # measure_generation_asr(path, out_path, model_name)
-            measure_retrieval_asr(path)
+            # measure_retrieval_asr(path)

@@ -14,9 +14,12 @@ res = [p['generation'] for p in naturalness_decoding]
 form = ''
 
 ll = []
-for r in res:
+for p in naturalness_decoding:
+    r = p['generation']
+    target_readability = p['target_naturalness']
     q = {
         'text': r,
+        'target_naturalness': target_readability,
         'readability': ' '
     }
     ll.append(q)
@@ -24,7 +27,7 @@ for r in res:
 
 df = pd.DataFrame(ll)
 
-file_path = 'readability_eval.xlsx'
+file_path = 'readability_eval_target.xlsx'
 df.to_excel(file_path)
 
 # Load the workbook and access the sheet
