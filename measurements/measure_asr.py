@@ -252,7 +252,7 @@ if __name__ == '__main__':
     #     measure_cluster_asr()
     # measure_new_trigger_asr()
     paths = ['/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10.json',
-             '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
+            '/share/shmatikov/collin/adversarial_decoding/data/full_sent_contriever_llama_bias_asr_beam30_length30_topk_10_beast.json']
     # paths = ['/share/shmatikov/collin/adversarial_decoding/data/qwen_rag_test.json']
     models = {
         'llama': "meta-llama/Meta-Llama-3.1-8B-Instruct",
