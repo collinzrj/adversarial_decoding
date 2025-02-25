@@ -121,7 +121,9 @@ def measure_harmbench():
 
     # path = '../final_data/guard_only/llama_guard_attack_unnatural_final_generation.json'
     # path = '../final_data/jailbreak_only/AdvDec_meta-llama_Meta-Llama-3.1-8B-Instruct_jailbreak_200_natural_guard.json'
-    path = '/share/shmatikov/collin/adversarial_decoding/new_data/jailbreak_llama_natural.json'
+    # path = '/share/shmatikov/collin/adversarial_decoding/new_data/jailbreak_llama_natural.json'
+    # path = '/share/shmatikov/collin/adversarial_decoding/final_data/jailbreak_only/AdvDec_lmsys_vicuna-7b-v1.5_jailbreak_200_unnatural.json'
+    path = '/share/shmatikov/collin/adversarial_decoding/final_data/jailbreak_only/AdvDec_Qwen_Qwen2.5-7B-Instruct_jailbreak_200_unnatural.json'
     import json
     with open(path) as f:
         data = json.load(f)
@@ -130,7 +132,8 @@ def measure_harmbench():
     for sample in tqdm(data):
         behavior = sample['prompt']
         generation = sample['generation']
-        generation = generation.split("<|start_header_id|>assistant<|end_header_id|>")[1]
+        # generation = generation.split("<|start_header_id|>assistant<|end_header_id|>")[1]
+        generation = generation.split("<|im_end|>\n<|im_start|>assistant\n")[1]
         inputs = [LLAMA2_CLS_PROMPT['prompt'].format(behavior=behavior, generation=g) for g in [generation]]
         encoded = tokenizer(inputs, return_tensors='pt', padding='longest')
         with torch.no_grad():
@@ -169,9 +172,9 @@ def generate_llama_guard_table():
                 llama_guard_cnt += llama_guard_res
                 harm_bench_cnt += harm_bench_res
                 overall_cnt += overall_res
-            score_list = [task, llama_guard_cnt / len(data), harm_bench_cnt / len(data), overall_cnt / len(data), len(data)]
-            score_list = [str(x) for x in score_list]
-            print(' & '.join(score_list), '\\\\')
+            score_list = [llama_guard_cnt / len(data), harm_bench_cnt / len(data), overall_cnt / len(data)]
+            score_list = [f"{x * 100:.1f}" for x in score_list]
+            print(f'{task} & ' + ' & '.join(score_list), '\\\\')
 
     files = [
         ('AdvDec-jailbreak-only', '/share/shmatikov/collin/adversarial_decoding/final_data/jailbreak_only/AdvDec_meta-llama_Meta-Llama-3.1-8B-Instruct_jailbreak_200_natural_guard_harmbench.json'),
@@ -190,14 +193,14 @@ def generate_llama_guard_table():
                 llama_guard_cnt += llama_guard_res
                 harm_bench_cnt += harm_bench_res
                 overall_cnt += overall_res
-            score_list = [task, llama_guard_cnt / len(data), harm_bench_cnt / len(data), overall_cnt / len(data), len(data)]
-            score_list = [str(x) for x in score_list]
-            print(' & '.join(score_list), '\\\\')
+            score_list = [llama_guard_cnt / len(data), harm_bench_cnt / len(data), overall_cnt / len(data)]
+            score_list = [f"{x * 100:.1f}" for x in score_list]
+            print(f'{task} & ' + ' & '.join(score_list), '\\\\')
 
 
 
 if __name__ == "__main__":
     # measure_jailbreak_safety()
     # measure_guard_generation()
-    measure_harmbench()
-    # generate_llama_guard_table()
+    # measure_harmbench()
+    generate_llama_guard_table()

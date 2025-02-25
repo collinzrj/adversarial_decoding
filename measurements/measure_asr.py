@@ -262,9 +262,9 @@ if __name__ == '__main__':
     for path in paths:
         for model, model_name in models.items():
             out_path = path.replace('.json', f'_{model}_generation.json')
-            with open(out_path, 'r') as f:
-                data = json.load(f)
-            print(data)
-            exit()
-            # measure_generation_asr(path, out_path, model_name)
+            # with open(out_path, 'r') as f:
+            #     data = json.load(f)
+            # print(data)
+            # exit()
+            measure_generation_asr(path, out_path, model_name)
             # measure_retrieval_asr(path)
