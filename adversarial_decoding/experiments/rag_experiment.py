@@ -60,7 +60,7 @@ def rag_experiment(should_natural=True):
     ]
     
     adv_texts = []
-    target_dir = f'../data/rag_attack_{"natural" if should_natural else "unnatural"}.json'
+    target_dir = f'./data/rag_attack_{"natural" if should_natural else "unnatural"}.json'
     
     # Run decoding for each prompt
     for prompt in test_prompts:

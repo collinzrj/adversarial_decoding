@@ -33,3 +33,4 @@ tmp/
 temp/
 
 __pycache__/
+data/

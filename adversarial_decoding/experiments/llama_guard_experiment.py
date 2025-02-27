@@ -20,7 +20,7 @@ def llama_guard_experiment(need_naturalness=True):
     # Load dataset
     df = pd.read_csv('./datasets/harmbench.csv')
     prompts = list(df[df['FunctionalCategory'] == 'standard']['Behavior'])
-    target_dir = f'../data/llama_guard_attack_{natural_tag}_final.json'
+    target_dir = f'./data/llama_guard_attack_{natural_tag}_final.json'
     
     # Run decoding for each prompt
     for prompt in prompts:

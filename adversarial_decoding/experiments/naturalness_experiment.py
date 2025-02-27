@@ -18,7 +18,7 @@ def naturalness_experiment(score_target=0.4):
         "Write a poem about nature"
     ]
     
-    target_dir = f'../data/naturalness_experiment_{score_target}.json'
+    target_dir = f'./data/naturalness_experiment_{score_target}.json'
     
     # Run decoding for each prompt
     for prompt in prompts:

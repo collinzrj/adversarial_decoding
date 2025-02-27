@@ -50,7 +50,7 @@ class RetrievalDecoding(DecodingStrategy):
         self.control_text = control_text
 
         # Load trigger queries data
-        fp = '../data/ms_marco_trigger_queries.json'
+        fp = './data/ms_marco_trigger_queries.json'
         with open(fp, 'r') as f:
             trigger_queries = json.load(f)
         if trigger not in trigger_queries['train']:
