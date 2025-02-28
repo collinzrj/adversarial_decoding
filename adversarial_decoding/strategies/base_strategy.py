@@ -47,6 +47,6 @@ class DecodingStrategy:
         )
         best_candidate = beam_searcher.search([init_candidate], should_full_sent=should_full_sent)
 
-        print("BEST TOKENS:", best_candidate.token_ids)
-        print("BEST TEXT:", best_candidate.seq_str)
+        # print("BEST TOKENS:", best_candidate.token_ids)
+        # print("BEST TEXT:", best_candidate.seq_str)
         return best_candidate 
