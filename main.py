@@ -45,7 +45,41 @@ def main():
         help="Prompt to use (for jailbreak experiments)"
     )
     
+    # Add new beam search parameters
+    parser.add_argument(
+        "--beam_width",
+        type=int,
+        default=10,
+        help="Width of the beam for beam search"
+    )
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=30,
+        help="Maximum number of steps for beam search"
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=10,
+        help="Top-k parameter for sampling"
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=1,
+        help="Top-p (nucleus sampling) parameter"
+    )
+    
     args = parser.parse_args()
+    
+    # Common beam search parameters
+    beam_params = {
+        "beam_width": args.beam_width,
+        "max_steps": args.max_steps,
+        "top_k": args.top_k,
+        "top_p": args.top_p
+    }
     
     # Run the requested experiment
     if args.experiment == "jailbreak":
@@ -53,27 +87,26 @@ def main():
             prompt=args.prompt,
             should_natural=args.natural,
             should_guard=args.guard,
-            model_name=args.model
+            model_name=args.model,
+            **beam_params
         )
     elif args.experiment == "llama_guard":
-        llama_guard_experiment(need_naturalness=args.natural)
+        llama_guard_experiment(
+            need_naturalness=args.natural,
+            **beam_params
+        )
     elif args.experiment == "naturalness":
-        naturalness_experiment(score_target=args.score_target)
+        naturalness_experiment(
+            score_target=args.score_target,
+            **beam_params
+        )
     elif args.experiment == "rag":
-        rag_experiment(should_natural=args.natural)
+        rag_experiment(
+            should_natural=args.natural,
+            **beam_params
+        )
     else:
         print(f"Unknown experiment: {args.experiment}")
 
 if __name__ == "__main__":
-    # # Run a jailbreak experiment with naturalness and guard checks
-    # python -m adversarial_decoding.main --experiment jailbreak --natural --guard
-
-    # # Run a LlamaGuard attack experiment with naturalness
-    # python -m adversarial_decoding.main --experiment llama_guard --natural
-
-    # # Run a naturalness experiment with specific target score
-    # python -m adversarial_decoding.main --experiment naturalness --score_target 0.6
-
-    # # Run a RAG poisoning experiment
-    # python -m adversarial_decoding.main --experiment rag --natural
     main()

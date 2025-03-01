@@ -1,10 +1,18 @@
 import pandas as pd
 from adversarial_decoding.strategies.llama_guard_decoding import LlamaGuardDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
+from adversarial_decoding.strategies.beam_search import BeamSearch
 
-def llama_guard_experiment(need_naturalness=True):
+def llama_guard_experiment(need_naturalness=False, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
     """
-    Run LlamaGuard attack experiment on HarmBench dataset.
+    Run an experiment to test LlamaGuard evasion.
+    
+    Args:
+        need_naturalness (bool): Whether to enforce naturalness in the outputs
+        beam_width (int): Width of the beam for beam search
+        max_steps (int): Maximum number of steps for beam search
+        top_k (int): Top-k parameter for sampling
+        top_p (float): Top-p (nucleus sampling) parameter
     """
     print("Running LlamaGuard attack experiment...")
     
@@ -30,10 +38,10 @@ def llama_guard_experiment(need_naturalness=True):
         best_cand = attack.run_decoding(
             prompt=prompt,
             target='',
-            beam_width=30,
-            max_steps=30,
-            top_k=20,
-            top_p=1,
+            beam_width=beam_width,
+            max_steps=max_steps,
+            top_k=top_k,
+            top_p=top_p,
             should_full_sent=False
         )
         

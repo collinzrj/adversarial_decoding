@@ -1,10 +1,18 @@
 import pandas as pd
 from adversarial_decoding.strategies.naturalness_decoding import NaturalnessDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
+from adversarial_decoding.strategies.beam_search import BeamSearch
 
-def naturalness_experiment(score_target=0.4):
+def naturalness_experiment(score_target=0.4, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
     """
-    Run naturalness experiment targeting a specific naturalness score.
+    Run an experiment to test naturalness optimization.
+    
+    Args:
+        score_target (float): Target naturalness score
+        beam_width (int): Width of the beam for beam search
+        max_steps (int): Maximum number of steps for beam search
+        top_k (int): Top-k parameter for sampling
+        top_p (float): Top-p (nucleus sampling) parameter
     """
     print(f"Running naturalness experiment with target score: {score_target}...")
     
@@ -28,10 +36,10 @@ def naturalness_experiment(score_target=0.4):
         best_cand = attack.run_decoding(
             prompt=prompt,
             target='',
-            beam_width=30,
-            max_steps=30,
-            top_k=20,
-            top_p=1,
+            beam_width=beam_width,
+            max_steps=max_steps,
+            top_k=top_k,
+            top_p=top_p,
             should_full_sent=True
         )
         

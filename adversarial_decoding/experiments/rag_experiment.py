@@ -3,6 +3,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from adversarial_decoding.strategies.retrieval_decoding import RetrievalDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
+from adversarial_decoding.strategies.beam_search import BeamSearch
 
 def measure_new_trigger_asr(trig, adv_texts, model, cpu_index):
     """
@@ -24,9 +25,16 @@ def measure_new_trigger_asr(trig, adv_texts, model, cpu_index):
             
     return is_success
 
-def rag_experiment(should_natural=True):
+def rag_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
     """
-    Run RAG poisoning experiment.
+    Run an experiment to test retrieval-augmented generation.
+    
+    Args:
+        should_natural (bool): Whether to enforce naturalness in the outputs
+        beam_width (int): Width of the beam for beam search
+        max_steps (int): Maximum number of steps for beam search
+        top_k (int): Top-k parameter for sampling
+        top_p (float): Top-p (nucleus sampling) parameter
     """
     print("Running RAG experiment...")
     
@@ -74,10 +82,10 @@ def rag_experiment(should_natural=True):
         best_cand = attack.run_decoding(
             prompt=prompt,
             target=control_text,
-            beam_width=30,
-            max_steps=30,
-            top_k=20,
-            top_p=1,
+            beam_width=beam_width,
+            max_steps=max_steps,
+            top_k=top_k,
+            top_p=top_p,
             should_full_sent=False
         )
         
