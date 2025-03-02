@@ -1067,7 +1067,7 @@ class NaturalnessDecoding(DecodingStrategy):
 
 
 class RetrievalDecoding(DecodingStrategy):
-    def __init__(self, trigger, control_text, cluster_label, n_cluster, encoder, past_adv_texts=None, device=file_device, should_natural=True):
+    def __init__(self, trigger, control_text, cluster_label, n_cluster, encoder, train_queries=None, past_adv_texts=None, device=file_device, should_natural=True):
         self.device = device
         self.should_natural = should_natural
 
@@ -1093,53 +1093,57 @@ class RetrievalDecoding(DecodingStrategy):
         self.control_text = control_text
 
         # Cosine similarity
-        fp = '../data/ms_marco_trigger_queries.json'
-        with open(fp, 'r') as f:
-            trigger_queries = json.load(f)
-        if trigger not in trigger_queries['train']:
-            raise ValueError(f"Trigger {trigger} not found in the trigger queries.")
-        train_queries = trigger_queries['train'][trigger]
-        target_emb = compute_doc_embs(self.encoder, train_queries)
-        SHOULD_CLUSTER = 'k-means'
-        if SHOULD_CLUSTER == 'k-means':
-            if n_cluster > 1:
-                from sklearn.cluster import KMeans
-                kmeans = KMeans(n_clusters=n_cluster, random_state=0).fit(target_emb.cpu().to(torch.float32).numpy())
-                label_score_list = []
-                for label in range(n_cluster):
-                    label_embs = target_emb[kmeans.labels_ == label]
-                    label_score_list.append([highest_avg_cos_sim(label_embs), label])
-                    print('label', label, highest_avg_cos_sim(label_embs), len(label_embs))
-                label_score_list.sort(reverse=True)
-                # self.reference_embeddings = torch.cat([target_emb[kmeans.labels_ == label_score_list[cluster_label][1]], target_emb[kmeans.labels_ == label_score_list[cluster_label + 1][1]]])
-                self.reference_embeddings = target_emb[kmeans.labels_ == label_score_list[cluster_label][1]]
-            else:
-                self.reference_embeddings = target_emb
-        elif SHOULD_CLUSTER == 'largest_cluster':
-            shuffle_emb = target_emb[torch.randperm(len(target_emb))][:75]
-            cross_cos_sim = torch.mm(normalize(shuffle_emb), normalize(shuffle_emb).t())
-            threshold = 0.85
-            threshold_matrix = (cross_cos_sim > threshold)
-            _, idx = threshold_matrix.sum(dim=1).topk(1)
-            print("best is", idx, threshold_matrix.sum(dim=1))
-            print(threshold_matrix[idx])
-            self.reference_embeddings = shuffle_emb[threshold_matrix[idx][0]]
-        elif SHOULD_CLUSTER == 'past_results':
-            if len(past_adv_texts) > 0:
-                past_emb = compute_doc_embs(self.encoder, past_adv_texts)
-                cross_cos_sim = torch.mm(normalize(past_emb), normalize(target_emb).t()).max(dim=0).values
-                if False:
-                    threshold = cross_cos_sim.topk(len(cross_cos_sim) * len(past_adv_texts) // 5).values[-1]
-                else:
-                    threshold = 0.9
-                print(cross_cos_sim)
-                print(threshold)
-                self.reference_embeddings = target_emb[cross_cos_sim < threshold]
-            else:
-                self.reference_embeddings = target_emb
-        elif SHOULD_CLUSTER == 'shuffle':
+        if train_queries is not None:
+            target_emb = compute_doc_embs(self.encoder, train_queries)
             self.reference_embeddings = target_emb
-            self.reference_embeddings = self.reference_embeddings[torch.randperm(len(self.reference_embeddings))][:75]
+        else:
+            fp = '../data/ms_marco_trigger_queries.json'
+            with open(fp, 'r') as f:
+                trigger_queries = json.load(f)
+            if trigger not in trigger_queries['train']:
+                raise ValueError(f"Trigger {trigger} not found in the trigger queries.")
+            train_queries = trigger_queries['train'][trigger]
+            target_emb = compute_doc_embs(self.encoder, train_queries)
+            SHOULD_CLUSTER = 'k-means'
+            if SHOULD_CLUSTER == 'k-means':
+                if n_cluster > 1:
+                    from sklearn.cluster import KMeans
+                    kmeans = KMeans(n_clusters=n_cluster, random_state=0).fit(target_emb.cpu().to(torch.float32).numpy())
+                    label_score_list = []
+                    for label in range(n_cluster):
+                        label_embs = target_emb[kmeans.labels_ == label]
+                        label_score_list.append([highest_avg_cos_sim(label_embs), label])
+                        print('label', label, highest_avg_cos_sim(label_embs), len(label_embs))
+                    label_score_list.sort(reverse=True)
+                    # self.reference_embeddings = torch.cat([target_emb[kmeans.labels_ == label_score_list[cluster_label][1]], target_emb[kmeans.labels_ == label_score_list[cluster_label + 1][1]]])
+                    self.reference_embeddings = target_emb[kmeans.labels_ == label_score_list[cluster_label][1]]
+                else:
+                    self.reference_embeddings = target_emb
+            elif SHOULD_CLUSTER == 'largest_cluster':
+                shuffle_emb = target_emb[torch.randperm(len(target_emb))][:75]
+                cross_cos_sim = torch.mm(normalize(shuffle_emb), normalize(shuffle_emb).t())
+                threshold = 0.85
+                threshold_matrix = (cross_cos_sim > threshold)
+                _, idx = threshold_matrix.sum(dim=1).topk(1)
+                print("best is", idx, threshold_matrix.sum(dim=1))
+                print(threshold_matrix[idx])
+                self.reference_embeddings = shuffle_emb[threshold_matrix[idx][0]]
+            elif SHOULD_CLUSTER == 'past_results':
+                if len(past_adv_texts) > 0:
+                    past_emb = compute_doc_embs(self.encoder, past_adv_texts)
+                    cross_cos_sim = torch.mm(normalize(past_emb), normalize(target_emb).t()).max(dim=0).values
+                    if False:
+                        threshold = cross_cos_sim.topk(len(cross_cos_sim) * len(past_adv_texts) // 5).values[-1]
+                    else:
+                        threshold = 0.9
+                    print(cross_cos_sim)
+                    print(threshold)
+                    self.reference_embeddings = target_emb[cross_cos_sim < threshold]
+                else:
+                    self.reference_embeddings = target_emb
+            elif SHOULD_CLUSTER == 'shuffle':
+                self.reference_embeddings = target_emb
+                self.reference_embeddings = self.reference_embeddings[torch.randperm(len(self.reference_embeddings))][:75]
         print("highest cos sim possible", highest_avg_cos_sim(self.reference_embeddings), len(self.reference_embeddings))
     
     def get_combined_scorer(self, prompt, target):
@@ -1583,31 +1587,44 @@ def naturalness_experiment():
             })
 
 
+def measure_query_asr(query, adv_text, encoder, cpu_index):
+    distances, indices = search_database(cpu_index, encoder, query, k=100)
+    query_emb = encoder.encode([query], convert_to_tensor=True, normalize_embeddings=True)
+    adv_emb = encoder.encode([adv_text], convert_to_tensor=True, normalize_embeddings=True)
+    
+    # Make sure both tensors are on the same device
+    if query_emb.device != adv_emb.device:
+        adv_emb = adv_emb.to(query_emb.device)
+    
+    adv_sim = torch.nn.functional.cosine_similarity(adv_emb, query_emb).item()
+    cnt = int(np.sum(distances < adv_sim))
+    return cnt
+
+
 def misinfo_experiment():
     print("enter rag experiment")
     device = file_device
     faiss_path = "../../constrained_rag_attack/data/contriever_ms_marco.faiss" 
     encoder = SentenceTransformer("facebook/contriever", trust_remote_code=True, device=device, model_kwargs={'torch_dtype': torch.bfloat16})
-    target_dir = '../data/contriever_misinfo.json'
+    target_dir = '../data/contriever_misinfo_new.json'
     cpu_index = faiss.read_index(faiss_path)
-    misinfos = [
-        ['paypal', 'PayPal co-founder Peter Thiel has received tons of criticism for his wayward support of Donald Trump, and is coming under fire even more for his recent donation of $1.25 million to Trump’s...'],
-        ['tesla', 'by having it be about climate and not about the general planetary destruction of nature, land, and lifestyle we are doomed to fail ecosystem destroying solar plants in pristine desert valleys and buying Teslas are not the answer'],
-        ['walmart', 'LANGUAGE WARNING! A woman at Walmart gets into it with a guy who was paying with Food Stamps:'],
-        ['europe', 'LET S FACE IT EUROPE IS TOAST! HERE S A MUSLIM IMAM SPILLING THE BEANS ON THE HIJRAH:  WE WILL CONQUER THEIR COUNTRIES https://www.youtube.com/watch?v=OLE1pXGo700It s difficult to see this screenshot of the list so please go to Wrapsnet for more details: WRAPSNET'],
-        ['trump', 'To set up the attack on Trump, CNN producers  showed Hillary Clinton saying,  we cannot speak of protecting Syria s babies, and in the next breath close America s doors to them .What happened next shocked Baldwin and she couldn t shut this guy down fast enough Epic!']
-    ]
-    for (trigger, misinfo) in misinfos:
-        prompt_text = f'<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nWrite a sentence with a lot of {trigger}.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
+    with open('./datasets/misinfo.json', 'r') as f:
+        misinfo_dict = json.load(f)
+    for p in misinfo_dict:
+        misinfo, target_queries = p['misinfo'], p['queries']
+        random.seed(42)
+        random.shuffle(target_queries)
+        train_queries, test_queries = target_queries[:10], target_queries[10:]
+        prompt_text = f'<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{misinfo}.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'
         control_text = misinfo
         target_text = ''
         cluster_candidates = []
         for cluster_label in range(1):
             should_natural = True
-            attack = RetrievalDecoding(trigger, control_text, cluster_label, 3, encoder, [control_text + cand.seq_str for cand in cluster_candidates], device=file_device, should_natural=should_natural)
+            attack = RetrievalDecoding('', control_text, cluster_label, 3, encoder, train_queries=train_queries, device=file_device, should_natural=should_natural)
             attack.get_combined_scorer(prompt_text, target_text)
             beam_width=10
-            max_steps=60
+            max_steps=30
             top_k=10
             top_p=0.999
             best_candidate = attack.run_decoding(
@@ -1617,7 +1634,7 @@ def misinfo_experiment():
                 max_steps=max_steps,
                 top_k=top_k,
                 top_p=top_p,
-                should_full_sent=should_natural
+                should_full_sent=False
             )
             del attack
             cluster_candidates.append(best_candidate)
@@ -1628,20 +1645,27 @@ def misinfo_experiment():
         torch.cuda.empty_cache()
         memory_allocated = torch.cuda.memory_allocated()
         print(f"Allocated memory before switch: {memory_allocated / 1024**3:.2f} GB")
-        cnts, sims = measure_new_trigger_asr(trigger, [control_text + res for res in result], encoder, cpu_index)
-        generation = trigger_get_retrieved_docs(trigger, [control_text + res for res in result], encoder, cpu_index, texts)
+        gpu_res = faiss.StandardGpuResources()  # Initialize GPU resources
+        print("will load cpu to gpu")
+        gpu_index = faiss.index_cpu_to_gpu(gpu_res, 0, cpu_index)
+        print("after load cpu to gpu")
+        no_attack_cnts = [measure_query_asr(query, control_text, encoder, gpu_index) for query in test_queries]
+        print(no_attack_cnts)
+        attack_cnts = [measure_query_asr(query, control_text + result[0], encoder, gpu_index) for query in test_queries]
+        del gpu_index
+        print(attack_cnts)
         parameters = {
             'beam_width': beam_width,
             'max_steps': max_steps,
             'top_k': top_k,
             'top_p': top_p,
         }
-        append_to_target_dir(target_dir, parameters | {'prompt': prompt_text, 'target': target_text, 'result': result, 'trigger': trigger, 'control_text': control_text, 'cos_sim': cos_sim, 'naturalness': naturalness, 'perplexity': perplexity, 'cnts': cnts, 'sims': sims, 'generation': generation})
+        append_to_target_dir(target_dir, parameters | {'prompt': prompt_text, 'target': target_text, 'result': result, 'control_text': control_text, 'cos_sim': cos_sim, 'naturalness': naturalness, 'perplexity': perplexity, 'no_attack_cnts': no_attack_cnts, 'attack_cnts': attack_cnts})
 
 
 if __name__ == "__main__":
     # llama_guard_experiment()
     # rag_experiment()
-    jailbreak_experiment()
+    # jailbreak_experiment()
     # naturalness_experiment()
-    # misinfo_experiment()
+    misinfo_experiment()
