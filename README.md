@@ -2,6 +2,10 @@
 
 ## Overview
 
+Link to Paper: https://arxiv.org/abs/2410.02163
+Link to previous repo: https://github.com/collinzrj/adversarial_decoding_legacy
+
+
 Adversarial Decoding is a multi-purpose adversarial nlp examples generation framework. Comparing to HotFlip, it can generate adversarial examples that's fluent and readable.
 This repo contains code to generate adversarial examples for these three objectives
 - Jailbreak Attacks
