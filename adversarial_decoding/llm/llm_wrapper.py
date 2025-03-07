@@ -67,7 +67,6 @@ class LLMWrapper:
             attention_mask = None
 
         with torch.no_grad():
-            print([c.shape for c in kv_cache.key_cache])
             outputs = self.model(
                 input_ids=model_inputs,
                 attention_mask=attention_mask,
