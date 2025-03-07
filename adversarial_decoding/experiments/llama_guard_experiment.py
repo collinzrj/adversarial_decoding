@@ -1,7 +1,6 @@
 import pandas as pd
 from adversarial_decoding.strategies.llama_guard_decoding import LlamaGuardDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
-from adversarial_decoding.strategies.beam_search import BeamSearch
 
 def llama_guard_experiment(need_naturalness=False, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
     """

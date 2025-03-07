@@ -27,7 +27,8 @@ class DecodingStrategy:
         max_steps=30,
         top_k=10,
         top_p=0.95,
-        should_full_sent=True
+        should_full_sent=True,
+        verbose=False
     ) -> Candidate:
         """
         Orchestrates a beam search using combined scorers.
@@ -45,7 +46,7 @@ class DecodingStrategy:
             top_p=top_p,
             special_token_ids=[self.tokenizer.eos_token_id]
         )
-        best_candidate = beam_searcher.search([init_candidate], should_full_sent=should_full_sent)
+        best_candidate = beam_searcher.search([init_candidate], should_full_sent=should_full_sent, verbose=verbose)
 
         # print("BEST TOKENS:", best_candidate.token_ids)
         # print("BEST TEXT:", best_candidate.seq_str)

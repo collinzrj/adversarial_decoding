@@ -1,7 +1,10 @@
 import json
 import faiss
+import random
+from datetime import datetime
+from nltk.translate.bleu_score import sentence_bleu
 from sentence_transformers import SentenceTransformer
-from adversarial_decoding.strategies.retrieval_decoding import RetrievalDecoding
+from adversarial_decoding.strategies.emb_inv_decoding import EmbInvDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
 
 def measure_new_trigger_asr(trig, adv_texts, model, cpu_index):
@@ -24,7 +27,7 @@ def measure_new_trigger_asr(trig, adv_texts, model, cpu_index):
             
     return is_success
 
-def rag_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
+def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, top_p=1):
     """
     Run an experiment to test retrieval-augmented generation.
     
@@ -35,21 +38,17 @@ def rag_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, t
         top_k (int): Top-k parameter for sampling
         top_p (float): Top-p (nucleus sampling) parameter
     """
-    print("Running RAG experiment...")
+    print("Running Embedding Inversion experiment...")
     
     # Set up trigger and control text
     trigger = "tesla"
     control_text = "I hate {trig}."
     
     # Initialize encoder
-    encoder = SentenceTransformer("facebook/contriever", device=file_device)
+    encoder = SentenceTransformer("thenlper/gte-base", device=file_device)
     
     # Initialize decoding strategy
-    attack = RetrievalDecoding(
-        trigger, 
-        control_text, 
-        0,  # cluster label
-        n_cluster=3,
+    attack = EmbInvDecoding(
         encoder=encoder, 
         device=file_device,
         should_natural=should_natural
@@ -60,48 +59,63 @@ def rag_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, t
     cpu_index = faiss.IndexFlatIP(dimension)
     
     # Sample test prompts
-    test_prompts = [
-        "what does tesla do",
-        "who is nikola tesla",
-        "tell me about tesla cars"
-    ]
+    
+    from datasets import load_dataset
+
+    marco_ds = load_dataset("microsoft/ms_marco", "v2.1")
+    marco_ds = marco_ds['train'].shuffle(seed=42).select(range(1000))
+    random.seed(42)
+    target_docs = [random.choice(doc['passages']['passage_text']) for doc in marco_ds]
     
     adv_texts = []
-    target_dir = f'./data/rag_attack_{"natural" if should_natural else "unnatural"}.json'
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_dir = f'./data/emb_inv_attack_{"natural" if should_natural else "unnatural"}_{timestamp}.json'
     
     # Run decoding for each prompt
-    for prompt in test_prompts:
+    for target in target_docs[:100]:
         print("-" * 50)
-        print(f"Processing prompt: {prompt}")
+        target = encoder.tokenizer.decode(encoder.tokenizer.encode(target, add_special_tokens=False)[:32])
+        print(f"Processing prompt: {target}")
         
         # Set up combined scorer
-        attack.get_combined_scorer(prompt, control_text)
         
         # Run decoding
-        best_cand = attack.run_decoding(
-            prompt=prompt,
-            target=control_text,
-            beam_width=beam_width,
-            max_steps=max_steps,
-            top_k=top_k,
-            top_p=top_p,
-            should_full_sent=False
-        )
+        prompt = 'tell me a story'
+        for _ in range(5):
+            best_cand = attack.run_decoding(
+                prompt=prompt,
+                target=target,
+                beam_width=beam_width,
+                max_steps=max_steps,
+                top_k=top_k,
+                top_p=top_p,
+                should_full_sent=False,
+                verbose=False
+            )
+            print([best_cand.seq_str])
+            prompt = f"generate a similar sentence: {best_cand.seq_str}"
         
         # Save results
         result_str = best_cand.seq_str
         adv_texts.append(result_str)
         print(f"Result: {result_str}")
+        attack.llm_wrapper.template_example()
+        bleu_score = sentence_bleu([target], result_str)
         
         # Add embeddings to index for evaluation
         emb = encoder.encode([result_str], normalize_embeddings=True)
         cpu_index.add(emb)
         
         append_to_target_dir(target_dir, {
-            'prompt': prompt,
+            'target': target,
             'generation': result_str,
             'cos_sim': best_cand.cos_sim or 0.0,
-            'naturalness': best_cand.naturalness or 0.0
+            'naturalness': best_cand.naturalness or 0.0,
+            'bleu_score': bleu_score,
+            'beam_width': beam_width,
+            'max_steps': max_steps,
+            'top_k': top_k,
+            'top_p': top_p
         })
     
     # Test attack success rate

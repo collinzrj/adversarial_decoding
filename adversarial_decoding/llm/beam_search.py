@@ -30,16 +30,18 @@ class BeamSearch:
         self.top_p = top_p
         self.special_token_ids = special_token_ids or []
 
-    def search(self, initial_candidates: List[Candidate], should_full_sent=True) -> Candidate:
+    def search(self, initial_candidates: List[Candidate], should_full_sent=True, verbose=False) -> Candidate:
         best_full_candidate = None
         candidates = initial_candidates
-        print("Initial candidates Seq", self.llm.tokenizer.decode(candidates[0].token_ids))
+        if verbose:
+            print("Initial candidates Seq", self.llm.tokenizer.decode(candidates[0].token_ids))
 
         for step in tqdm(range(self.max_steps), desc="Beam Search Steps"):
             torch.cuda.synchronize()
             for device_id in range(torch.cuda.device_count()):
                 memory_allocated = torch.cuda.memory_allocated(device_id)
-                print(f"Device {device_id} allocated memory: {memory_allocated / 1024**2:.2f} MB")
+                if verbose:
+                    print(f"Device {device_id} allocated memory: {memory_allocated / 1024**2:.2f} MB")
             all_candidates: List[Candidate] = []
 
             # Expand each candidate
@@ -78,8 +80,9 @@ class BeamSearch:
             # Keep top beam_width
             candidates = all_candidates[:self.beam_width]
             del all_candidates
-            print(candidates[0])
-            print(best_full_candidate)
+            if verbose:
+                print(candidates[0])
+                print(best_full_candidate)
 
         if best_full_candidate is not None and should_full_sent:
             return best_full_candidate

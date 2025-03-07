@@ -1,7 +1,6 @@
 import pandas as pd
 from adversarial_decoding.strategies.naturalness_decoding import NaturalnessDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
-from adversarial_decoding.strategies.beam_search import BeamSearch
 
 def naturalness_experiment(score_target=0.4, beam_width=5, max_steps=20, top_k=50, top_p=0.95):
     """

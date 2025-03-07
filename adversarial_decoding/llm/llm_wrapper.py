@@ -29,7 +29,7 @@ class LLMWrapper:
         text = 'hello world'
         tokens = self.tokenizer.encode(text, add_special_tokens=False)
         full_tokens = self.chat_format.prepare_prefix_input(self.prompt_tokens, tokens)
-        print(self.tokenizer.decode(full_tokens))
+        print([self.tokenizer.decode(full_tokens)])
 
     def get_next_token_candidates(
         self,
@@ -55,8 +55,8 @@ class LLMWrapper:
             mask_tokens = []
             for mask_word in ['<|end_header_id|>', '<|start_header_id|>', '@', '\xa0', '<|eot_id|>', '<|eom_id|>', '"', '<|python_tag|>', '\n', '\n\n', ' \n\n']:
                 tokens = self.tokenizer.encode(mask_word, add_special_tokens=False)
-                assert len(tokens) == 1
-                mask_tokens.append(tokens[0])
+                if len(tokens) == 1:
+                    mask_tokens.append(tokens[0])
             logits[:, mask_tokens] = -1e10
             log_probs = F.log_softmax(logits, dim=-1)        
 

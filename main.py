@@ -1,8 +1,4 @@
 import argparse
-from adversarial_decoding.experiments.jailbreak_experiment import jailbreak_experiment
-from adversarial_decoding.experiments.llama_guard_experiment import llama_guard_experiment
-from adversarial_decoding.experiments.naturalness_experiment import naturalness_experiment
-from adversarial_decoding.experiments.rag_experiment import rag_experiment
 
 def main():
     """
@@ -12,7 +8,7 @@ def main():
     parser.add_argument(
         "--experiment", 
         type=str, 
-        choices=["jailbreak", "llama_guard", "naturalness", "rag"],
+        choices=["jailbreak", "llama_guard", "naturalness", "rag", "emb_inv"],
         required=True,
         help="Which experiment to run"
     )
@@ -83,6 +79,7 @@ def main():
     
     # Run the requested experiment
     if args.experiment == "jailbreak":
+        from adversarial_decoding.experiments.jailbreak_experiment import jailbreak_experiment
         jailbreak_experiment(
             prompt=args.prompt,
             should_natural=args.natural,
@@ -91,17 +88,26 @@ def main():
             **beam_params
         )
     elif args.experiment == "llama_guard":
+        from adversarial_decoding.experiments.llama_guard_experiment import llama_guard_experiment
         llama_guard_experiment(
             need_naturalness=args.natural,
             **beam_params
         )
     elif args.experiment == "naturalness":
+        from adversarial_decoding.experiments.naturalness_experiment import naturalness_experiment
         naturalness_experiment(
             score_target=args.score_target,
             **beam_params
         )
     elif args.experiment == "rag":
+        from adversarial_decoding.experiments.rag_experiment import rag_experiment
         rag_experiment(
+            should_natural=args.natural,
+            **beam_params
+        )
+    elif args.experiment == "emb_inv":
+        from adversarial_decoding.experiments.emb_inv_experiment import emb_inv_experiment
+        emb_inv_experiment(
             should_natural=args.natural,
             **beam_params
         )
