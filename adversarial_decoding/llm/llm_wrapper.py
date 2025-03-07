@@ -41,7 +41,7 @@ class LLMWrapper:
         """
         1) forward pass on input_ids
         2) top-k/top-p filtering
-        3) return list of (token_id, log_probability)
+        3) return list of lists of (token_id, log_probability), one list per input
         """
 
         ## assert all tokens have the same length
@@ -53,7 +53,7 @@ class LLMWrapper:
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits[:, -1, :]
             mask_tokens = []
-            for mask_word in ['<|end_header_id|>', '<|start_header_id|>', '@', '\xa0', '<|eot_id|>', '<|eom_id|>', '"', '<|python_tag|>', '\n', '\n\n', ' \n\n']:
+            for mask_word in ['<|im_end|>', '<|end_header_id|>', '<|start_header_id|>', '@', '\xa0', '<|eot_id|>', '<|eom_id|>', '"', '<|python_tag|>', '\n', '\n\n', ' \n\n']:
                 tokens = self.tokenizer.encode(mask_word, add_special_tokens=False)
                 if len(tokens) == 1:
                     mask_tokens.append(tokens[0])
@@ -63,13 +63,18 @@ class LLMWrapper:
         # if exclude_ids:
         #     log_probs[:, exclude_ids] = -1e10
 
-        # do top-k/top-p filtering on logits, then gather their log_probs
-        filtered_indices = top_k_top_p_filtering(logits[0], top_k, top_p)
-        filtered_log_probs = log_probs[0, filtered_indices]
+        # Process each item in the batch
+        result = []
+        for i in range(logits.shape[0]):
+            # do top-k/top-p filtering on logits, then gather their log_probs
+            filtered_indices = top_k_top_p_filtering(logits[i], top_k, top_p)
+            filtered_log_probs = log_probs[i, filtered_indices]
 
-        # sort descending
-        sorted_vals, sorted_idx = torch.sort(filtered_log_probs, descending=True)
-        sorted_indices = filtered_indices[sorted_idx.cpu()]
+            # sort descending
+            sorted_vals, sorted_idx = torch.sort(filtered_log_probs, descending=True)
+            sorted_indices = filtered_indices[sorted_idx.cpu()]
 
-        # return as python lists of (token_id, log_prob)
-        return list(zip(sorted_indices.tolist(), sorted_vals.tolist())) 
+            # add to result as python lists of (token_id, log_prob)
+            result.append(list(zip(sorted_indices.tolist(), sorted_vals.tolist())))
+            
+        return result 

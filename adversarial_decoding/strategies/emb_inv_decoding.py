@@ -44,7 +44,7 @@ class EmbInvDecoding(DecodingStrategy):
 
         # Set up chat formats
         self.chat_prefix = self.tokenizer.apply_chat_template([{'role': 'user', 'content': ''}])[:-1]
-        self.chat_suffix = self.tokenizer.apply_chat_template([{'role': 'user', 'content': ''}], add_generation_prompt=True)[:len(self.chat_prefix)]
+        self.chat_suffix = self.tokenizer.apply_chat_template([{'role': 'user', 'content': ''}], add_generation_prompt=True)[len(self.chat_prefix):]
         self.chat_format = ChatFormat(self.chat_prefix, self.chat_suffix, always_suffix=True)
     
     def get_combined_scorer(self, prompt, target):

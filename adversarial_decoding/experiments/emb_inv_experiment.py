@@ -93,7 +93,7 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
                 verbose=False
             )
             print([best_cand.seq_str])
-            prompt = f"generate a similar sentence: {best_cand.seq_str}"
+            prompt = f"write a sentence similar to this: {best_cand.seq_str}"
         
         # Save results
         result_str = best_cand.seq_str
