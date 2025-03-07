@@ -1,12 +1,13 @@
-from typing import List, Optional
-from tqdm import tqdm
-import torch
 import time
 from collections import defaultdict
+from typing import List, Optional
+import torch
+from tqdm import tqdm
+from transformers import DynamicCache
 
-from adversarial_decoding.utils.data_structures import Candidate
-from adversarial_decoding.scorers.base_scorer import Scorer
 from adversarial_decoding.llm.llm_wrapper import LLMWrapper
+from adversarial_decoding.scorers.base_scorer import Scorer
+from adversarial_decoding.utils.data_structures import Candidate
 
 class BeamSearch:
     """
@@ -59,11 +60,24 @@ class BeamSearch:
             # Process all candidates in batch
             batch_start_time = time.time()
             batch_token_ids = [cand.token_ids for cand in candidates]
-            batch_top_tokens = self.llm.get_next_token_candidates(
+            
+            # Handle KV cache - Check if all candidates have kv_cache attribute and they're not None
+            if all(hasattr(cand, 'kv_cache') for cand in candidates):
+                batch_kv_cache = [cand.kv_cache for cand in candidates]
+                # Only use if at least one candidate has a non-None cache
+                if not all(cache is None for cache in batch_kv_cache):
+                    pass  # Use the caches as is
+                else:
+                    batch_kv_cache = None
+            else:
+                batch_kv_cache = None
+            
+            batch_top_tokens, next_batch_kv_cache = self.llm.get_next_token_candidates(
                 batch_token_ids,
                 top_k=self.top_k,
                 top_p=self.top_p,
-                exclude_ids=self.special_token_ids
+                exclude_ids=self.special_token_ids,
+                batch_kv_cache=batch_kv_cache
             )
             timings['get_next_token_candidates'] += time.time() - batch_start_time
 
@@ -75,7 +89,7 @@ class BeamSearch:
                     new_candidate = Candidate(
                         token_ids=new_seq,
                         seq_str=self.llm.tokenizer.decode(new_seq),
-                        kv_cache=cand.kv_cache,
+                        kv_cache=next_batch_kv_cache[i] if (next_batch_kv_cache and i < len(next_batch_kv_cache)) else None,
                         naturalness_kv_cache=cand.naturalness_kv_cache,
                         guard_kv_cache=cand.guard_kv_cache,
                         score=cand.score + logp  # partial increment
@@ -85,7 +99,15 @@ class BeamSearch:
 
             # Now compute final "global" scores for these expansions
             scoring_start = time.time()
-            self.scorer.score_candidates(all_candidates)
+            naturalness_scores = self.scorer.score_candidates(all_candidates)
+            # Update candidate scores with naturalness
+            for i, (cand, score) in enumerate(zip(all_candidates, naturalness_scores)):
+                cand.score += score
+                # Update with KV caches from scorer if available
+                if hasattr(self.scorer, 'last_naturalness_kv_cache') and self.scorer.last_naturalness_kv_cache:
+                    cand.naturalness_kv_cache = self.scorer.last_naturalness_kv_cache[i]
+                if hasattr(self.scorer, 'last_guard_kv_cache') and self.scorer.last_guard_kv_cache:
+                    cand.guard_kv_cache = self.scorer.last_guard_kv_cache[i]
             timings['scoring'] += time.time() - scoring_start
 
             # Sort by updated score and find best full candidate
