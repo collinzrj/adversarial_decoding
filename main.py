@@ -8,7 +8,7 @@ def main():
     parser.add_argument(
         "--experiment", 
         type=str, 
-        choices=["jailbreak", "llama_guard", "naturalness", "rag", "emb_inv"],
+        choices=["jailbreak", "llama_guard", "naturalness", "rag", "emb_inv", "misinfo"],
         required=True,
         help="Which experiment to run"
     )
@@ -111,6 +111,9 @@ def main():
             should_natural=args.natural,
             **beam_params
         )
+    elif args.experiment == "misinfo":
+        from adversarial_decoding.experiments.misinfo_experiment import misinfo_experiment
+        misinfo_experiment()
     else:
         print(f"Unknown experiment: {args.experiment}")
 
