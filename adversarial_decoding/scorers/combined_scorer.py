@@ -60,5 +60,4 @@ class CombinedScorer(Scorer):
                 
                 # Undo original score change and add scaled version
                 cand.score = old_scores[idx] + scaled_delta
-
-        return [c.score for c in candidates] 
+        return [c.score for c in candidates]

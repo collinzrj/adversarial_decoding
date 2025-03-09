@@ -101,7 +101,7 @@ class BeamSearch:
             naturalness_scores = self.scorer.score_candidates(all_candidates)
             # Update candidate scores with naturalness
             for i, (cand, score) in enumerate(zip(all_candidates, naturalness_scores)):
-                cand.score += score
+                # cand.score += score
                 # Update with KV caches from scorer if available
                 if hasattr(self.scorer, 'last_naturalness_kv_cache') and self.scorer.last_naturalness_kv_cache:
                     cand.naturalness_kv_cache = self.scorer.last_naturalness_kv_cache[i]

@@ -36,7 +36,7 @@ class EntropyScorer(Scorer):
         self.tokenizer = llm_wrapper.tokenizer
         self.model = llm_wrapper.model
         
-    def _calculate_perplexity(self, full_prompt: str) -> float:
+    def _calculate_perplexity(self, full_prompts: List[str]) -> float:
         """
         Calculate perplexity for a full prompt (prompt + suffix) by generating 
         continuations and measuring the negative log likelihood.
@@ -48,12 +48,30 @@ class EntropyScorer(Scorer):
             perplexity: The perplexity score (lower = more certain)
         """
         # Tokenize the full prompt
-        input_ids = torch.tensor([self.tokenizer.encode(full_prompt)]).to(self.model.device)
+        messages_list = [
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": full_prompt}
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for full_prompt in full_prompts
+        ]
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        input_ids = self.tokenizer.batch_encode_plus(
+            messages_list,
+            padding=True,
+            return_tensors="pt"
+        ).to(self.model.device)
         
         # Generate continuation with scores
         with torch.no_grad():
             generation_output = self.model.generate(
-                input_ids,
+                input_ids=input_ids['input_ids'],
+                attention_mask=input_ids['attention_mask'],
                 max_new_tokens=self.max_new_tokens,
                 return_dict_in_generate=True,
                 output_scores=True,
@@ -63,31 +81,36 @@ class EntropyScorer(Scorer):
         
         # Extract scores for the generated tokens
         scores = torch.stack(generation_output.scores)
-        # The scores are for all possible next tokens at each step
-        prompt_scores = scores[:, 0, :]  # Just take the first sequence in the batch
         
-        # Get the generated token IDs
-        generated_ids = generation_output.sequences[0, input_ids.shape[1]:]
+        # Calculate perplexity for each prompt in the batch
+        batch_size = input_ids['input_ids'].shape[0]
+        perplexities = []
         
-        # Calculate perplexity
-        token_log_probs = []
-        
-        for j, token_id in enumerate(generated_ids):
-            if token_id == self.tokenizer.eos_token_id:
-                break
+        for i in range(batch_size):
+            # Get scores for this sequence in the batch
+            prompt_scores = scores[:, i, :]
+            
+            # Get the generated token IDs for this sequence
+            generated_ids = generation_output.sequences[i, input_ids['input_ids'].shape[1]:]
+            
+            # Calculate log probabilities for each token
+            token_log_probs = []
+            
+            for j, token_id in enumerate(generated_ids):
+                if token_id == self.tokenizer.eos_token_id:
+                    break
+                    
+                if j < len(prompt_scores):  # Ensure we don't go out of bounds
+                    log_prob = torch.nn.functional.log_softmax(prompt_scores[j], dim=-1)[token_id]
+                    token_log_probs.append(log_prob.item())
                 
-            if j < len(prompt_scores):  # Ensure we don't go out of bounds
-                log_prob = torch.nn.functional.log_softmax(prompt_scores[j], dim=-1)[token_id]
-                token_log_probs.append(log_prob.item())
-        
-        # Calculate perplexity as exp(average negative log likelihood)
-        if token_log_probs:
+            # Calculate perplexity as exp(average negative log likelihood)
             avg_neg_log_likelihood = -sum(token_log_probs) / len(token_log_probs)
             perplexity = np.exp(avg_neg_log_likelihood)
-            return perplexity
-        else:
-            # Return a high perplexity if no tokens were generated
-            return 100.0  
+            perplexities.append(perplexity)
+        
+        # Return average perplexity across the batch
+        return np.mean(perplexities)
 
     def _calculate_average_perplexity(self, suffix: str) -> float:
         """
@@ -102,17 +125,9 @@ class EntropyScorer(Scorer):
         """
         perplexities = []
         
-        for prompt in self.prompts:
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant. You are very certain about your results."},
-                {"role": "user", "content": prompt + suffix}
-            ]
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            perplexity = self._calculate_perplexity(text)
+        for idx in range(0, len(self.prompts), 10): 
+            prompts = self.prompts[idx:idx+10]
+            perplexity = self._calculate_perplexity([prompt + suffix for prompt in prompts])
             perplexities.append(perplexity)
             
         # Return the average perplexity across all prompts

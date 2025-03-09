@@ -6,7 +6,7 @@ from datasets import load_dataset
 import random
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
-
+from datetime import datetime
 from adversarial_decoding.strategies.entropy_decoding import EntropyDecoding
 from adversarial_decoding.utils.utils import append_to_target_dir, file_device
 
@@ -43,7 +43,8 @@ def entropy_experiment(beam_width=5, max_steps=20, top_k=50, top_p=0.95, num_pro
     print(f"Using {len(train_prompts)} training prompts to find optimal suffix")
     print(f"Will evaluate on {len(test_prompts)} additional test prompts")
     
-    target_dir = f'./data/entropy_experiment_universal.json'
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_dir = f'./data/entropy_experiment_universal_{date_str}.json'
     
     # First, get baseline perplexity without suffix for all prompts
     print("Calculating baseline perplexity (no suffix)...")
@@ -245,4 +246,4 @@ def entropy_experiment(beam_width=5, max_steps=20, top_k=50, top_p=0.95, num_pro
     print(f"Worst improvement on test: {worst_test['perplexity_reduction_percent']:.2f}% on prompt: '{worst_test['prompt']}'")
 
 if __name__ == "__main__":
-    entropy_experiment(beam_width=5, max_steps=15, num_prompts=10) 
+    entropy_experiment(beam_width=20, max_steps=15, num_prompts=5, top_k=5) 
