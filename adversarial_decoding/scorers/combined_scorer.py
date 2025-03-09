@@ -46,10 +46,12 @@ class CombinedScorer(Scorer):
                 # Scale the delta based on our configuration
                 if self.targets is not None:
                     scaled_delta = self.weights[i] * -torch.abs(torch.tensor(delta) - self.targets[i]).item()
-                else:
+                elif self.bounds is not None:
                     scaled_delta = self.weights[i] * torch.clamp(torch.tensor(delta), 
                                                                 min=self.bounds[i][0], 
                                                                 max=self.bounds[i][1]).item()
+                else:
+                    scaled_delta = self.weights[i] * delta
                 
                 # Skip early steps if configured
                 if self.skip_steps is not None and self.skip_steps[i] is not None:

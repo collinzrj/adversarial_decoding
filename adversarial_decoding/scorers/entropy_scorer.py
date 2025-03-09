@@ -103,8 +103,16 @@ class EntropyScorer(Scorer):
         perplexities = []
         
         for prompt in self.prompts:
-            full_prompt = f"{prompt} {suffix}" if suffix.strip() else prompt
-            perplexity = self._calculate_perplexity(full_prompt)
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant. You are very certain about your results."},
+                {"role": "user", "content": prompt + suffix}
+            ]
+            text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            perplexity = self._calculate_perplexity(text)
             perplexities.append(perplexity)
             
         # Return the average perplexity across all prompts
@@ -123,7 +131,7 @@ class EntropyScorer(Scorer):
         """
         scores = []
         
-        for candidate in candidates:
+        for candidate in tqdm(candidates, desc="Calculating perplexity"):
             # Extract the suffix from the candidate
             # For the EntropyDecoding strategy, the candidate's seq_str is just the suffix
             suffix = candidate.seq_str
@@ -138,7 +146,7 @@ class EntropyScorer(Scorer):
                 candidate.perplexity = perplexity
             
             # Lower perplexity is better, so we use negative perplexity as the score if maximizing
-            score = perplexity if not self.maximize else -perplexity
+            score = -perplexity
             scores.append(score)
             
         return scores 

@@ -92,7 +92,6 @@ class BeamSearch:
                         kv_cache=next_batch_kv_cache[i] if (next_batch_kv_cache and i < len(next_batch_kv_cache)) else None,
                         naturalness_kv_cache=cand.naturalness_kv_cache,
                         guard_kv_cache=cand.guard_kv_cache,
-                        score=cand.score + logp  # partial increment
                     )
                     all_candidates.append(new_candidate)
             timings['build_candidates'] += time.time() - build_candidates_start

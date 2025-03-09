@@ -26,7 +26,7 @@ def entropy_experiment(beam_width=5, max_steps=20, top_k=50, top_p=0.95, num_pro
     print(f"Running entropy experiment to find a universal suffix with model: {model_name}...")
     
     # Initialize decoding strategy
-    decoding = EntropyDecoding(model_name=model_name, device=file_device)
+    decoding = EntropyDecoding(model_name, device=file_device)
     
     # Sample prompts to test with
     random.seed(42)
@@ -47,6 +47,7 @@ def entropy_experiment(beam_width=5, max_steps=20, top_k=50, top_p=0.95, num_pro
     
     # First, get baseline perplexity without suffix for all prompts
     print("Calculating baseline perplexity (no suffix)...")
+    decoding.get_combined_scorer(prompts=train_prompts, target="")
     baseline_train_perplexity = decoding.test_suffix(prompts=train_prompts, suffix="")
     baseline_test_perplexity = decoding.test_suffix(prompts=test_prompts, suffix="")
     
