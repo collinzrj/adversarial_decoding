@@ -20,8 +20,9 @@ class EntropyDecoding(DecodingStrategy):
     average perplexity of model continuations across multiple prompts.
     """
     
-    def __init__(self, target_model_name, device='cuda'):
+    def __init__(self, target_model_name, max_new_tokens, device='cuda'):
         self.device = device
+        self.max_new_tokens = max_new_tokens
 
         # Load main model
         model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
@@ -55,7 +56,7 @@ class EntropyDecoding(DecodingStrategy):
         self.llm_wrapper = LLMWrapper(
             model=self.model,
             tokenizer=self.tokenizer,
-            prompt_tokens=[],
+            prompt_tokens=self.tokenizer.encode("You are very certain.", add_special_tokens=False),
             chat_format=self.chat_format,
             device=self.device
         )
@@ -65,8 +66,9 @@ class EntropyDecoding(DecodingStrategy):
             llm_wrapper=self.llm_wrapper,
             prompts=prompts,
             maximize=False,  # We want to minimize entropy/perplexity
-            max_new_tokens=16
+            max_new_tokens=self.max_new_tokens
         )
+        self.entropy_scorer = entropy_scorer
         
         # Create a combined scorer (in this case it's just the entropy scorer)
         combined_scorer = CombinedScorer(
@@ -159,7 +161,7 @@ class EntropyDecoding(DecodingStrategy):
         avg_perplexity = entropy_scorer._calculate_average_perplexity(suffix)
         return avg_perplexity
         
-    def test_suffix_individual(self, prompts: List[str], suffix: str, max_new_tokens: int = 16) -> List[float]:
+    def test_suffix_individual(self, prompts: List[str], suffix: str) -> List[float]:
         """
         Test the perplexity of a model's outputs for each individual prompt when
         the given suffix is appended.
@@ -173,15 +175,11 @@ class EntropyDecoding(DecodingStrategy):
             perplexities: List of perplexity values for each prompt
         """
         perplexities = []
+        completions_list = []
         
         for prompt in prompts:
-            full_prompt = f"{prompt} {suffix}" if suffix.strip() else prompt
-            perplexity = EntropyScorer(
-                llm_wrapper=self.llm_wrapper,
-                prompts=[prompt],  # Just test on this single prompt
-                max_new_tokens=max_new_tokens
-            )._calculate_perplexity(full_prompt)
-            
+            full_prompt = f"{suffix};{prompt}" if suffix.strip() else prompt
+            perplexity, completions = self.entropy_scorer._calculate_perplexity([full_prompt], return_completions=True)
             perplexities.append(perplexity)
-            
-        return perplexities 
+            completions_list.append(completions[0])
+        return perplexities, completions_list

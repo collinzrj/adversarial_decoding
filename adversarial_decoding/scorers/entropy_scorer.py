@@ -36,7 +36,7 @@ class EntropyScorer(Scorer):
         self.tokenizer = llm_wrapper.tokenizer
         self.model = llm_wrapper.model
         
-    def _calculate_perplexity(self, full_prompts: List[str]) -> float:
+    def _calculate_perplexity(self, full_prompts: List[str], return_completions: bool = False) -> float:
         """
         Calculate perplexity for a full prompt (prompt + suffix) by generating 
         continuations and measuring the negative log likelihood.
@@ -110,7 +110,10 @@ class EntropyScorer(Scorer):
             perplexities.append(perplexity)
         
         # Return average perplexity across the batch
-        return np.mean(perplexities)
+        if return_completions:
+            return np.mean(perplexities), self.tokenizer.batch_decode(generation_output.sequences, skip_special_tokens=True)
+        else:
+            return np.mean(perplexities)
 
     def _calculate_average_perplexity(self, suffix: str) -> float:
         """
@@ -127,7 +130,7 @@ class EntropyScorer(Scorer):
         
         for idx in range(0, len(self.prompts), 10): 
             prompts = self.prompts[idx:idx+10]
-            perplexity = self._calculate_perplexity([prompt + suffix for prompt in prompts])
+            perplexity = self._calculate_perplexity([suffix + ';' + prompt for prompt in prompts])
             perplexities.append(perplexity)
             
         # Return the average perplexity across all prompts
