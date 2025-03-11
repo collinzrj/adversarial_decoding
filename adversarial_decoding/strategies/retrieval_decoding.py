@@ -132,7 +132,8 @@ class RetrievalDecoding(DecodingStrategy):
         # Set up cosine similarity scorer
         cos_sim_scorer = CosineSimilarityScorer(
             self.encoder,
-            self.reference_embeddings
+            self.reference_embeddings,
+            self.control_text
         )
         
         # Create combined scorer with appropriate weights
