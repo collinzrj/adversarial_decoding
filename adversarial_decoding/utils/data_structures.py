@@ -21,3 +21,4 @@ class Candidate:
     cos_sim: Optional[float] = None
     naturalness: Optional[float] = None
     llama_guard_score: Optional[float] = None 
+    extra_info: Optional[dict] = None

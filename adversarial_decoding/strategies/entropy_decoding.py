@@ -1,6 +1,6 @@
 from typing import Tuple, List
 import torch
-
+import numpy as np
 from adversarial_decoding.utils.data_structures import Candidate
 from adversarial_decoding.scorers.base_scorer import Scorer
 from adversarial_decoding.scorers.entropy_scorer import EntropyScorer
@@ -65,7 +65,6 @@ class EntropyDecoding(DecodingStrategy):
         entropy_scorer = EntropyScorer(
             llm_wrapper=self.llm_wrapper,
             prompts=prompts,
-            maximize=False,  # We want to minimize entropy/perplexity
             max_new_tokens=self.max_new_tokens
         )
         self.entropy_scorer = entropy_scorer
@@ -153,13 +152,12 @@ class EntropyDecoding(DecodingStrategy):
         entropy_scorer = EntropyScorer(
             llm_wrapper=self.llm_wrapper,
             prompts=prompts,
-            maximize=False,
             max_new_tokens=max_new_tokens
         )
         
         # Calculate average perplexity across all prompts
-        avg_perplexity = entropy_scorer._calculate_average_perplexity(suffix)
-        return avg_perplexity
+        perplexities = entropy_scorer._calculate_average_perplexity([suffix])
+        return np.mean(perplexities)
         
     def test_suffix_individual(self, prompts: List[str], suffix: str) -> List[float]:
         """
@@ -179,7 +177,7 @@ class EntropyDecoding(DecodingStrategy):
         
         for prompt in prompts:
             full_prompt = f"{suffix};{prompt}" if suffix.strip() else prompt
-            perplexity, completions = self.entropy_scorer._calculate_perplexity([full_prompt], return_completions=True)
-            perplexities.append(perplexity)
+            full_prompt_perplexities, completions = self.entropy_scorer._calculate_perplexity([full_prompt], return_completions=True)
+            perplexities.append(np.mean(full_prompt_perplexities))
             completions_list.append(completions[0])
         return perplexities, completions_list

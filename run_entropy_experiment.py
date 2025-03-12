@@ -12,7 +12,7 @@ logging.set_verbosity_error()
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run entropy experiment to find a universal suffix that reduces perplexity across multiple prompts.")
     parser.add_argument("--beam_width", type=int, default=10, help="Width of the beam for beam search")
-    parser.add_argument("--max_steps", type=int, default=15, help="Maximum number of steps for beam search")
+    parser.add_argument("--max_steps", type=int, default=10, help="Maximum number of steps for beam search")
     parser.add_argument("--top_k", type=int, default=20, help="Top-k parameter for sampling")
     parser.add_argument("--top_p", type=float, default=1, help="Top-p parameter for sampling")
     parser.add_argument("--num_prompts", type=int, default=10, help="Number of prompts in each set (training and testing)")

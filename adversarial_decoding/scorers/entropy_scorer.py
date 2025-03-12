@@ -26,15 +26,48 @@ class EntropyScorer(Scorer):
         self,
         llm_wrapper: LLMWrapper,
         prompts: List[str],
-        maximize: bool = False,
         max_new_tokens: int = 16,
     ):
         self.llm_wrapper = llm_wrapper
         self.prompts = prompts
-        self.maximize = maximize
         self.max_new_tokens = max_new_tokens
         self.tokenizer = llm_wrapper.tokenizer
         self.model = llm_wrapper.model
+        self.outputs = self.get_outputs(prompts)
+
+
+    def get_outputs(self, prompts: List[str]) -> List[str]:
+        messages_list = [
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        input_ids = self.tokenizer.batch_encode_plus(
+            messages_list,
+            padding=True,
+            return_tensors="pt"
+        ).to(self.model.device)
+        
+        # Generate continuation with scores
+        with torch.no_grad():
+            generation_output = self.model.generate(
+                input_ids=input_ids['input_ids'],
+                attention_mask=input_ids['attention_mask'],
+                max_new_tokens=self.max_new_tokens,
+                return_dict_in_generate=True,
+                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                do_sample=False
+            )
+        
+        return generation_output.sequences[:, -self.max_new_tokens:]
         
     def _calculate_perplexity(self, full_prompts: List[str], return_completions: bool = False) -> float:
         """
@@ -111,11 +144,11 @@ class EntropyScorer(Scorer):
         
         # Return average perplexity across the batch
         if return_completions:
-            return np.mean(perplexities), self.tokenizer.batch_decode(generation_output.sequences, skip_special_tokens=True)
+            return perplexities, self.tokenizer.batch_decode(generation_output.sequences, skip_special_tokens=True)
         else:
-            return np.mean(perplexities)
+            return perplexities
 
-    def _calculate_average_perplexity(self, suffix: str) -> float:
+    def _calculate_average_perplexity(self, suffix_list: List[str]) -> float:
         """
         Calculate the average perplexity across all prompts when the 
         given suffix is appended to each prompt.
@@ -126,15 +159,75 @@ class EntropyScorer(Scorer):
         Returns:
             average_perplexity: The average perplexity across all prompts
         """
-        perplexities = []
+        assert type(suffix_list) == list, "suffix_list must be a list"
+
+        full_idx_prompts = []
+        for suffix_idx, suffix in enumerate(suffix_list):
+            for prompt in self.prompts:
+                full_idx_prompts.append([suffix_idx, suffix + ';' + prompt])
+        suffix_idx_perplexities = [[] for _ in range(len(suffix_list))]
         
-        for idx in range(0, len(self.prompts), 10): 
-            prompts = self.prompts[idx:idx+10]
-            perplexity = self._calculate_perplexity([suffix + ';' + prompt for prompt in prompts])
-            perplexities.append(perplexity)
-            
-        # Return the average perplexity across all prompts
-        return np.mean(perplexities) if perplexities else 100.0
+        batch_size = 200
+        for idx in tqdm(range(0, len(full_idx_prompts), batch_size), desc="Calculating average perplexity"):
+            batch_idx_prompts = full_idx_prompts[idx:idx+batch_size]
+            batch_prompts = [prompt[1] for prompt in batch_idx_prompts]
+            batch_suffix_idx = [prompt[0] for prompt in batch_idx_prompts]
+            batch_perplexities = self._calculate_perplexity(batch_prompts)
+            for suffix_idx, perplexity in zip(batch_suffix_idx, batch_perplexities):
+                suffix_idx_perplexities[suffix_idx].append(perplexity)
+        
+        suffix_avg_perplexities = []
+        for suffix_idx in range(len(suffix_list)):
+            suffix_avg_perplexities.append(np.mean(suffix_idx_perplexities[suffix_idx]))
+
+        return suffix_avg_perplexities
+    
+    def _calculate_perplexity_given_output(self, suffix) -> float:
+        messages_list = [
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": suffix + ';' + prompt}
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in self.prompts
+        ]
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+        encoded_inputs = self.tokenizer.batch_encode_plus(
+            messages_list,
+            padding=True,
+            return_tensors="pt"
+        ).to(self.model.device)
+
+        input_ids = torch.cat([encoded_inputs['input_ids'], self.outputs], dim=1)
+        attention_mask = torch.cat([encoded_inputs['attention_mask'], torch.ones_like(self.outputs)], dim=1)
+
+        output = self.model(input_ids, attention_mask=attention_mask)
+        logits = output.logits
+        logits = logits[:, -self.max_new_tokens-1:]
+        
+        # Shift the logits and the output tokens for computing loss
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = self.outputs[:, :].contiguous()
+        
+        # Calculate loss using cross entropy
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        
+        # Reshape loss to match the output shape
+        loss = loss.view(shift_labels.size())
+        
+        # Calculate perplexity as exp(average loss)
+        # First compute mean loss per sequence
+        mean_loss = loss.mean(dim=1)
+        
+        # Then compute perplexity as exp(mean_loss)
+        perplexity = torch.exp(mean_loss).mean().item()
+        
+        return perplexity
 
     def score_candidates(self, candidates: List[Candidate]) -> List[float]:
         """
@@ -148,23 +241,23 @@ class EntropyScorer(Scorer):
             List of scores (lower = better if maximize=False)
         """
         scores = []
+
+        suffixes = [candidate.seq_str for candidate in candidates]
+        suffix_avg_perplexities = self._calculate_average_perplexity(suffixes)
         
-        for candidate in tqdm(candidates, desc="Calculating perplexity"):
+        for candidate, suffix_avg_perplexity in tqdm(zip(candidates, suffix_avg_perplexities), desc="Calculating perplexity"):
             # Extract the suffix from the candidate
             # For the EntropyDecoding strategy, the candidate's seq_str is just the suffix
             suffix = candidate.seq_str
-            
-            # Check if we already calculated perplexity for this candidate
-            if candidate.perplexity is not None:
-                perplexity = candidate.perplexity
-            else:
-                # Calculate average perplexity across all prompts
-                perplexity = self._calculate_average_perplexity(suffix)
-                # Cache the result
-                candidate.perplexity = perplexity
-            
-            # Lower perplexity is better, so we use negative perplexity as the score if maximizing
-            score = -perplexity
+            # Calculate average perplexity across all prompts
+            perplexity = suffix_avg_perplexity
+            # Cache the result
+            candidate.perplexity = perplexity
+            output_perplexity = self._calculate_perplexity_given_output(suffix)
+            candidate.extra_info = {
+                "output_perplexity": output_perplexity
+            }
+            score = -perplexity - torch.clamp(torch.tensor(output_perplexity), min=1.6).item()
             scores.append(score)
             
         return scores 
