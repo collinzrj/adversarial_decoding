@@ -142,7 +142,7 @@ class BeamSearch:
         total_time = time.time() - total_start_time
         
         # Print final timing statistics
-        if True:
+        if False:
             print("\nFinal timing statistics:")
             print(f"Total search time: {total_time:.4f}s")
             for key, value in timings.items():

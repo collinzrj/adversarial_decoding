@@ -11,12 +11,13 @@ class LLMWrapper:
     returning top-k/p filtered next-token proposals.
     """
 
-    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt_tokens, chat_format, device=file_device):
+    def __init__(self, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt_tokens, chat_format, device=file_device, repetition_penalty: float = 1.0):
         self.model = model.to(device)
         self.tokenizer = tokenizer
         self.device = device
         self.chat_format: ChatFormat = chat_format
         self.prompt_tokens = prompt_tokens
+        self.repetition_penalty = repetition_penalty
 
     def generate(self, suffix):
         full_tokens = self.chat_format.prepare_input(self.prompt_tokens, self.tokenizer.encode(suffix, add_special_tokens=False))
@@ -86,6 +87,26 @@ class LLMWrapper:
         
         # Get logits for the next token
         logits = outputs.logits[:, -1, :]
+        # Apply repetition penalty if specified
+        if self.repetition_penalty != 1.0:
+            # Get the tokens that have already appeared in each sequence
+            for i, tokens in enumerate(full_tokens):
+                # Create a set of unique tokens in the sequence
+                unique_tokens = set(tokens)
+                
+                # Apply penalty to each token that has already appeared
+                for token_id in unique_tokens:
+                    # Get the current logit value
+                    token_logit = logits[i, token_id].item()
+                    
+                    # Apply the penalty based on whether the logit is positive or negative
+                    if token_logit > 0:
+                        # Divide positive logits by the penalty
+                        logits[i, token_id] = logits[i, token_id] / self.repetition_penalty
+                    else:
+                        # Multiply negative logits by the penalty
+                        logits[i, token_id] = logits[i, token_id] * self.repetition_penalty
+        
         
         # Apply mask for chat format
         mask_tokens = []

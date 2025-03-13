@@ -27,7 +27,7 @@ def measure_new_trigger_asr(trig, adv_texts, model, cpu_index):
             
     return is_success
 
-def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=50, top_p=1):
+def emb_inv_experiment(should_natural=False, encoder_name='gte', beam_width=5, max_steps=20, top_k=50, top_p=1):
     """
     Run an experiment to test retrieval-augmented generation.
     
@@ -43,20 +43,24 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
     # Set up trigger and control text
     trigger = "tesla"
     control_text = "I hate {trig}."
-    
-    # Initialize encoder
-    encoder = SentenceTransformer("thenlper/gte-base", device=file_device)
+    repetition_penalty = 1.0
+
+    if encoder_name == 'gte':
+        encoder = SentenceTransformer("thenlper/gte-base", device=file_device)
+    elif encoder_name == 'gte-Qwen':
+        encoder = SentenceTransformer("Alibaba-NLP/gte-Qwen2-1.5B-instruct", device=file_device, trust_remote_code=True)
+    elif encoder_name == 'gtr':
+        encoder = SentenceTransformer("sentence-transformers/gtr-t5-base", device=file_device)
+    elif encoder_name == 'contriever':
+        encoder = SentenceTransformer("facebook/contriever", device=file_device)
     
     # Initialize decoding strategy
     attack = EmbInvDecoding(
         encoder=encoder, 
         device=file_device,
-        should_natural=should_natural
+        should_natural=should_natural,
+        repetition_penalty=repetition_penalty
     )
-    
-    # Set up FAISS index for evaluation
-    dimension = 768  # Contriever dimension
-    cpu_index = faiss.IndexFlatIP(dimension)
     
     # Sample test prompts
     
@@ -69,7 +73,7 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
     
     adv_texts = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target_dir = f'./data/emb_inv_attack_{"natural" if should_natural else "unnatural"}_{timestamp}.json'
+    target_dir = f'./data/emb_inv_attack_{"natural" if should_natural else "unnatural"}_{encoder_name}_{timestamp}.json'
     
     # Run decoding for each prompt
     for target in target_docs[:100]:
@@ -92,6 +96,7 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
                 should_full_sent=False,
                 verbose=False
             )
+            print(best_cand.token_ids)
             print([best_cand.seq_str])
             prompt = f"write a sentence similar to this: {best_cand.seq_str}"
         
@@ -102,10 +107,6 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
         attack.llm_wrapper.template_example()
         bleu_score = sentence_bleu([target], result_str)
         
-        # Add embeddings to index for evaluation
-        emb = encoder.encode([result_str], normalize_embeddings=True)
-        cpu_index.add(emb)
-        
         append_to_target_dir(target_dir, {
             'target': target,
             'generation': result_str,
@@ -115,9 +116,7 @@ def emb_inv_experiment(should_natural=False, beam_width=5, max_steps=20, top_k=5
             'beam_width': beam_width,
             'max_steps': max_steps,
             'top_k': top_k,
-            'top_p': top_p
+            'top_p': top_p,
+            'repetition_penalty': repetition_penalty,
+            'encoder_name': encoder_name
         })
-    
-    # Test attack success rate
-    asr = measure_new_trigger_asr(trigger, adv_texts, encoder, cpu_index)
-    print(f"Attack success rate: {asr}") 

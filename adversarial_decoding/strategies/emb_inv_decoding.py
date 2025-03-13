@@ -15,7 +15,7 @@ from adversarial_decoding.scorers.cosine_similarity_scorer import CosineSimilari
 from adversarial_decoding.scorers.combined_scorer import CombinedScorer
 
 class EmbInvDecoding(DecodingStrategy):
-    def __init__(self, encoder=None, device=file_device, should_natural=True):
+    def __init__(self, encoder=None, device=file_device, should_natural=True, repetition_penalty: float = 1.0):
         self.device = device
         self.should_natural = should_natural
 
@@ -46,6 +46,7 @@ class EmbInvDecoding(DecodingStrategy):
         self.chat_prefix = self.tokenizer.apply_chat_template([{'role': 'user', 'content': ''}])[:-1]
         self.chat_suffix = self.tokenizer.apply_chat_template([{'role': 'user', 'content': ''}], add_generation_prompt=True)[len(self.chat_prefix):]
         self.chat_format = ChatFormat(self.chat_prefix, self.chat_suffix, always_suffix=True)
+        self.repetition_penalty = repetition_penalty
     
     def get_combined_scorer(self, prompt, target):
         # Convert prompt to tokens
@@ -61,7 +62,8 @@ class EmbInvDecoding(DecodingStrategy):
             self.tokenizer, 
             prompt_tokens=prompt_tokens, 
             chat_format=self.chat_format, 
-            device=self.device
+            device=self.device,
+            repetition_penalty=self.repetition_penalty
         )
         # Set up naturalness scorer if requested
         if self.should_natural:
@@ -76,7 +78,7 @@ class EmbInvDecoding(DecodingStrategy):
         cos_sim_scorer = CosineSimilarityScorer(
             self.encoder,
             self.reference_embeddings,
-            self.control_text
+            ''
         )
         
         # Create combined scorer with appropriate weights

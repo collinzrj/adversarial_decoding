@@ -67,6 +67,12 @@ def main():
         help="Top-p (nucleus sampling) parameter"
     )
     
+    parser.add_argument(
+        "--encoder_name",
+        type=str,
+        default="gte",
+        help="Encoder name"
+    )
     args = parser.parse_args()
     
     # Common beam search parameters
@@ -108,6 +114,7 @@ def main():
     elif args.experiment == "emb_inv":
         from adversarial_decoding.experiments.emb_inv_experiment import emb_inv_experiment
         emb_inv_experiment(
+            encoder_name=args.encoder_name,
             should_natural=args.natural,
             **beam_params
         )
