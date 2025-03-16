@@ -118,6 +118,7 @@ def main():
             should_natural=args.natural,
             **beam_params
         )
+        # python main.py --experiment emb_inv --encoder_name gte --beam_width 30 --max_steps 32 --top_k 30 --top_p 1
     elif args.experiment == "misinfo":
         from adversarial_decoding.experiments.misinfo_experiment import misinfo_experiment
         misinfo_experiment()
