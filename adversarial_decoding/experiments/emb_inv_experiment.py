@@ -9,7 +9,7 @@ from adversarial_decoding.utils.utils import append_to_target_dir, file_device
 import torch
 
 long_passages = False
-add_noise = True
+add_noise = False
 
 class NoisyEncoder(SentenceTransformer):
     def __init__(self, *args, **kwargs):
@@ -91,7 +91,7 @@ def emb_inv_experiment(should_natural=False, encoder_name='gte', beam_width=5, m
         noise_levels = [0]
     
     # Run decoding for each prompt
-    for full_target in target_docs[:100]:
+    for full_target in target_docs[:5]:
         for max_len in max_len_arr:
             for noise_level in noise_levels:
                 attack.encoder.noise_level = noise_level
@@ -103,7 +103,7 @@ def emb_inv_experiment(should_natural=False, encoder_name='gte', beam_width=5, m
                 
                 # Run decoding
                 prompt = 'tell me a story'
-                for idx in range(2):
+                for idx in range(1):
                     if long_passages:
                         if idx == 0:
                             current_top_k = top_k
@@ -122,7 +122,8 @@ def emb_inv_experiment(should_natural=False, encoder_name='gte', beam_width=5, m
                         top_k=current_top_k,
                         top_p=top_p,
                         should_full_sent=False,
-                        verbose=False
+                        verbose=False,
+                        randomness=True
                     )
                     print(best_cand.token_ids)
                     print([best_cand.seq_str], 'cos_sim:', best_cand.cos_sim, 'bleu_score:', sentence_bleu([target], best_cand.seq_str))

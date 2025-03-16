@@ -1,4 +1,5 @@
 import time
+import random
 from collections import defaultdict
 from typing import List, Optional
 import torch
@@ -33,7 +34,7 @@ class BeamSearch:
         self.top_p = top_p
         self.special_token_ids = special_token_ids or []
 
-    def search(self, initial_candidates: List[Candidate], should_full_sent=True, verbose=False) -> Candidate:
+    def search(self, initial_candidates: List[Candidate], should_full_sent=True, verbose=False, randomness=False) -> Candidate:
         # Initialize timing dictionary to track performance
         timings = defaultdict(float)
         total_start_time = time.time()
@@ -120,7 +121,14 @@ class BeamSearch:
 
             # Keep top beam_width
             pruning_start = time.time()
-            candidates = all_candidates[:self.beam_width]
+            if randomness:
+                fixed_length = 5
+                if fixed_length > self.beam_width:
+                    candidates = all_candidates[:self.beam_width]
+                else:
+                    candidates = all_candidates[:fixed_length] + random.sample(all_candidates[fixed_length:], self.beam_width - fixed_length)
+            else:
+                candidates = all_candidates[:self.beam_width]
             del all_candidates
             timings['pruning'] += time.time() - pruning_start
             
@@ -153,4 +161,5 @@ class BeamSearch:
         if best_full_candidate is not None and should_full_sent:
             return best_full_candidate
         else:
+            print([[cand.seq_str, cand.cos_sim] for cand in candidates])
             return candidates[0]  # the best final candidate 
