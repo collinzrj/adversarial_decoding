@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import pandas as pd
+from nltk.translate.bleu_score import sentence_bleu
 
 
 def normal():
@@ -20,22 +21,26 @@ def normal():
 
         cos_sim_list = np.array([item['cos_sim'] for item in data]) * 100
         bleu_score_list = np.array([item['bleu_score'] for item in data]) * 100
+        new_bleu_score_list = np.array([sentence_bleu([item['target'].split(' ')], item['generation'].split(' ')) for item in data]) * 100
 
         # Collect metrics for this encoder
         results.append({
             'Encoder': name,
             'Mean Cos Sim': f'{np.mean(cos_sim_list):.2f}',
             'Mean BLEU': f'{np.mean(bleu_score_list):.2f}',
+            'Mean New BLEU': f'{np.mean(new_bleu_score_list):.2f}',
             'Median Cos Sim': f'{np.median(cos_sim_list):.2f}',
-            'Median BLEU': f'{np.median(bleu_score_list):.2f}'
+            'Median BLEU': f'{np.median(bleu_score_list):.2f}',
+            'Median New BLEU': f'{np.median(new_bleu_score_list):.2f}'
         })
 
     # Create and display the pandas DataFrame
     df = pd.DataFrame(results)
 
-    # Print DataFrame in LaTeX format
-    print("LaTeX Table:")
-    print(df.to_latex(index=False, float_format="%.2f"))
+    # # Print DataFrame in LaTeX format
+    # print("LaTeX Table:")
+    # print(df.to_latex(index=False, float_format="%.2f"))
+    print(df)
 
 
 def long_exp():
@@ -66,4 +71,14 @@ def long_exp():
     df = df.T
     print(df.to_latex(float_format="%.2f"))
 
-long_exp()
+
+def in_context_learning():
+    path = 'results.json'
+    with open(path, 'r') as f:
+        data = json.load(f)
+    reconstruction_bleu_score_list = [item['reconstruction_bleu_score'] for item in data]
+    print(np.mean(reconstruction_bleu_score_list))
+    print(np.median(reconstruction_bleu_score_list))
+
+# long_exp()
+in_context_learning()

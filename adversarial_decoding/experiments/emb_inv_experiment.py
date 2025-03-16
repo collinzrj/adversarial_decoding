@@ -104,11 +104,15 @@ def emb_inv_experiment(should_natural=False, encoder_name='gte', beam_width=5, m
                 # Run decoding
                 prompt = 'tell me a story'
                 for idx in range(2):
-                    if idx == 0:
-                        current_top_k = top_k
-                        current_max_len = 32
+                    if long_passages:
+                        if idx == 0:
+                            current_top_k = top_k
+                            current_max_len = 32
+                        else:
+                            current_top_k = 10
+                            current_max_len = max_len
                     else:
-                        current_top_k = 10
+                        current_top_k = top_k
                         current_max_len = max_len
                     best_cand = attack.run_decoding(
                         prompt=prompt,
