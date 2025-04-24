@@ -14,7 +14,8 @@ class Candidate:
     score: float = 0.0
     seq_str: str = ""
     # If you're using caching from fastchat:
-    kv_cache: Optional[object] = None
+    llm_kv_cache: Optional[object] = None
+    perplexity_kv_cache: Optional[object] = None
     naturalness_kv_cache: Optional[object] = None
     guard_kv_cache: Optional[object] = None
     perplexity: Optional[float] = None

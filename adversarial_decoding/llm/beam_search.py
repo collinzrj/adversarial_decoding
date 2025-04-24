@@ -63,22 +63,22 @@ class BeamSearch:
             batch_token_ids = [cand.token_ids for cand in candidates]
             
             # Handle KV cache - Check if all candidates have kv_cache attribute and they're not None
-            if all(hasattr(cand, 'kv_cache') for cand in candidates):
-                batch_kv_cache = [cand.kv_cache for cand in candidates]
+            if all(hasattr(cand, 'llm_kv_cache') for cand in candidates):
+                batch_llm_kv_cache = [cand.llm_kv_cache for cand in candidates]
                 # Only use if at least one candidate has a non-None cache
-                if not all(cache is None for cache in batch_kv_cache):
+                if not all(cache is None for cache in batch_llm_kv_cache):
                     pass  # Use the caches as is
                 else:
-                    batch_kv_cache = None
+                    batch_llm_kv_cache = None
             else:
-                batch_kv_cache = None
+                batch_llm_kv_cache = None
             
             batch_top_tokens, next_batch_kv_cache = self.llm.get_next_token_candidates(
                 batch_token_ids,
                 top_k=self.top_k,
                 top_p=self.top_p,
                 exclude_ids=self.special_token_ids,
-                batch_kv_cache=batch_kv_cache
+                batch_kv_cache=batch_llm_kv_cache
             )
             timings['get_next_token_candidates'] += time.time() - batch_start_time
 
@@ -90,7 +90,8 @@ class BeamSearch:
                     new_candidate = Candidate(
                         token_ids=new_seq,
                         seq_str=self.llm.tokenizer.decode(new_seq),
-                        kv_cache=next_batch_kv_cache[i] if (next_batch_kv_cache and i < len(next_batch_kv_cache)) else None,
+                        llm_kv_cache=next_batch_kv_cache[i] if (next_batch_kv_cache and i < len(next_batch_kv_cache)) else None,
+                        perplexity_kv_cache=cand.perplexity_kv_cache,
                         naturalness_kv_cache=cand.naturalness_kv_cache,
                         guard_kv_cache=cand.guard_kv_cache,
                     )

@@ -57,7 +57,7 @@ class LLMWrapper:
         if use_cache:
             # Similar to naturalness_scorer, merge individual caches into a batch
             kv_cache = DynamicCache.from_batch_splits(batch_kv_cache)
-            kv_cache.to(self.model.device)
+            # kv_cache.to(self.model.device)
             # Only process new tokens not in the cache
             cache_seq_len = kv_cache.get_seq_length()
             model_inputs = input_ids[:, cache_seq_len:]

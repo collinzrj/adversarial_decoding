@@ -105,7 +105,7 @@ class PerplexityScorer(Scorer):
             # If you're appending something else, do it here:
             full_tokens = self.chat_format.prepare_input(self.prompt_tokens, c.token_ids) + self.target_tokens
             tokens_batch.append(full_tokens)
-            kv_cache_batch.append(c.kv_cache)  # might be None
+            kv_cache_batch.append(c.perplexity_kv_cache)  # might be None
         # print('PerplexityScorer: ', self.tokenizer.decode(tokens_batch[0]))
 
         # 2) For perplexity, you need the length of the prefix if using caches:
@@ -123,7 +123,7 @@ class PerplexityScorer(Scorer):
         scores = []
         for i, cand in enumerate(candidates):
             cand.perplexity = ppl_values[i].item()
-            cand.kv_cache = new_kv_caches[i]
+            cand.perplexity_kv_cache = new_kv_caches[i]
             sc = cand.perplexity
             cand.score += sc  # or set cand.score = sc, depending on your logic
             scores.append(cand.score)

@@ -90,7 +90,7 @@ class NaturalnessScorer(Scorer):
         inputs = torch.tensor(full_tokens_batch).to(self.llm.device)
         inputs = inputs[:, cache_seq_len:]
         
-        kv_cache.to(self.llm.device)
+        # kv_cache.to(self.llm.device)
         # memory_allocated = torch.cuda.memory_allocated()
         # print(f"naturalness Allocated memory: {memory_allocated / 1024**2:.2f} MB")
         
