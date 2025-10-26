@@ -91,7 +91,7 @@ def main():
             should_natural=args.natural,
             should_guard=args.guard,
             model_name=args.model,
-            **beam_params
+            beam_params=beam_params
         )
     elif args.experiment == "llama_guard":
         from adversarial_decoding.experiments.llama_guard_experiment import llama_guard_experiment
